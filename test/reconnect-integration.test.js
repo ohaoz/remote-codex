@@ -8,7 +8,7 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'web', 'index.html'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'web', 'app.js'), 'utf8');
-const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
+const server = fs.readFileSync(path.join(root, 'server', 'gateway.js'), 'utf8');
 
 function sourceBetween(startNeedle, endNeedle) {
   const start = app.indexOf(startNeedle);

@@ -44,6 +44,7 @@ class TerminalManager extends EventEmitter {
     this.spawn = options.spawn || ((file, args, spawnOptions) => pty.spawn(file, args, spawnOptions));
     this.scrollbackLimit = Math.max(1, options.scrollbackLimit || SCROLLBACK_LIMIT);
     this.now = options.now || Date.now;
+    this.disposed = false;
   }
 
   _shellSpec(kind, opts) {
@@ -65,6 +66,7 @@ class TerminalManager extends EventEmitter {
   }
 
   create(kind = 'codex', opts = {}) {
+    if (this.disposed) throw new Error('terminal manager is disposed');
     const id = String(this.nextId++);
     const spec = this._shellSpec(kind, opts);
     const cwd = opts.cwd && typeof opts.cwd === 'string' ? opts.cwd : os.homedir();
@@ -168,6 +170,17 @@ class TerminalManager extends EventEmitter {
     this.sessions.delete(String(id));
     this.emit('closed', String(id));
     return true;
+  }
+
+  stop() {
+    this.dispose();
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const id of [...this.sessions.keys()]) this.kill(id);
+    this.removeAllListeners();
   }
 }
 

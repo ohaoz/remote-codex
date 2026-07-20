@@ -279,6 +279,12 @@ class CodexBridge extends EventEmitter {
     this.approvalTombstoneTtlMs = Math.max(1, options.approvalTombstoneTtlMs || APPROVAL_TOMBSTONE_TTL_MS);
     this.maxIndexedItems = Math.max(1, options.maxIndexedItems || MAX_INDEXED_ITEMS);
     this._createStreamId = options.createStreamId || createStreamId;
+    this._createRpcProcess = options.createRpcProcess
+      || ((spec) => new JsonRpcProcess(spec.command, spec.args, {
+        env: { ...process.env, RUST_LOG: process.env.RUST_LOG || 'error' },
+      }));
+    this._setTimeout = options.setTimeoutFn || setTimeout;
+    this._clearTimeout = options.clearTimeoutFn || clearTimeout;
     this.eventLog = new ThreadEventLog({
       streamId: this._createStreamId(),
       maxEventsPerThread: options.maxCachedEventsPerThread,
@@ -287,48 +293,109 @@ class CodexBridge extends EventEmitter {
     });
     this.threadEvents = this.eventLog.threads;
     this._hasStartedLifecycle = false;
+    this._lifecycle = 0;
+    this._restartTimer = null;
+    this._stopping = false;
+    this._disposed = false;
     this.restartDelay = 1000;
     this.stderrTail = [];
   }
 
   async start() {
+    if (this._disposed) return;
     if (this.state === 'starting' || this.state === 'ready') return;
+    this._stopping = false;
+    if (this._restartTimer !== null) {
+      this._clearTimeout(this._restartTimer);
+      this._restartTimer = null;
+    }
     if (this._hasStartedLifecycle) this._beginEventStream();
     else this._hasStartedLifecycle = true;
+    const lifecycle = ++this._lifecycle;
     this.state = 'starting';
     this.emit('status', this.state);
     const spec = codexSpawnSpec(['app-server']);
-    this.rpc = new JsonRpcProcess(spec.command, spec.args, { env: { ...process.env, RUST_LOG: process.env.RUST_LOG || 'error' } });
-    this.rpc.on('notification', (n) => this._onNotification(n));
-    this.rpc.on('request', (r) => this._onServerRequest(r));
-    this.rpc.on('stderr', (s) => {
+    const rpc = this._createRpcProcess(spec);
+    this.rpc = rpc;
+    rpc.on('notification', (n) => this._onNotification(n));
+    rpc.on('request', (r) => this._onServerRequest(r));
+    rpc.on('stderr', (s) => {
       this.stderrTail.push(s);
       if (this.stderrTail.length > 50) this.stderrTail.shift();
     });
-    this.rpc.on('exit', ({ code }) => {
+    let exitHandled = false;
+    rpc.on('exit', ({ code }) => {
+      if (exitHandled) return;
+      exitHandled = true;
+      if (this.rpc !== rpc || lifecycle !== this._lifecycle) return;
       const wasReady = this.state === 'ready';
+      this.rpc = null;
       this.state = 'stopped';
       this.pendingApprovals.clear();
       this.emit('status', this.state, { code });
+      if (this._stopping || this._disposed) return;
       // Auto-restart with backoff
       const delay = wasReady ? 1000 : Math.min((this.restartDelay *= 2), 30000);
-      setTimeout(() => { this.start().catch(() => {}); }, delay);
+      const timer = this._setTimeout(() => {
+        if (this._restartTimer !== timer) return;
+        this._restartTimer = null;
+        if (!this._stopping && !this._disposed) this.start().catch(() => {});
+      }, delay);
+      this._restartTimer = timer;
     });
-    this.rpc.start();
+    rpc.start();
     try {
-      this.initInfo = await this.rpc.request('initialize', {
+      const initInfo = await rpc.request('initialize', {
         clientInfo: { name: 'codex-remote', title: 'Codex Remote', version: APP_VERSION },
         capabilities: { experimentalApi: true, requestAttestation: false },
       }, 30000);
-      this.rpc.notify('initialized');
+      if (
+        this.rpc !== rpc
+        || lifecycle !== this._lifecycle
+        || this._stopping
+        || this._disposed
+      ) return;
+      this.initInfo = initInfo;
+      rpc.notify('initialized');
       this.state = 'ready';
       this.restartDelay = 1000;
       this.emit('status', this.state);
     } catch (e) {
+      if (
+        this.rpc !== rpc
+        || lifecycle !== this._lifecycle
+        || this._stopping
+        || this._disposed
+      ) return;
       this.state = 'error';
       this.emit('status', this.state, { error: e.message });
-      try { this.rpc.kill(); } catch {}
+      try { rpc.kill(); } catch {}
     }
+  }
+
+  async stop() {
+    this._stopping = true;
+    this._lifecycle += 1;
+    if (this._restartTimer !== null) {
+      this._clearTimeout(this._restartTimer);
+      this._restartTimer = null;
+    }
+    const rpc = this.rpc;
+    this.rpc = null;
+    if (rpc) {
+      try { rpc.kill(); } catch {}
+    }
+    this.pendingApprovals.clear();
+    if (this.state !== 'stopped') {
+      this.state = 'stopped';
+      this.emit('status', this.state);
+    }
+  }
+
+  async dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+    await this.stop();
   }
 
   isAllowed(method) {

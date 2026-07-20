@@ -46,10 +46,14 @@ function baseName(p) {
 
 /* ============================== state ============================== */
 const store = {
-  get token() { return localStorage.getItem('cr.token') || ''; },
-  set token(v) { v ? localStorage.setItem('cr.token', v) : localStorage.removeItem('cr.token'); },
   get prefs() { try { return JSON.parse(localStorage.getItem('cr.prefs') || '{}'); } catch { return {}; } },
   set prefs(v) { localStorage.setItem('cr.prefs', JSON.stringify(v)); },
+  get draft() { return localStorage.getItem('cr.draft') || ''; },
+  set draft(v) { v ? localStorage.setItem('cr.draft', v) : localStorage.removeItem('cr.draft'); },
+  get legacyToken() { return localStorage.getItem('cr.token') || ''; },
+  clearLegacyToken() {
+    localStorage.removeItem('cr.token');
+  },
 };
 
 const state = {
@@ -60,11 +64,15 @@ const state = {
   pendingReplayReset: null,
   bridge: 'stopped',
   serverInfo: null,
+  device: null,
+  sessionAuthenticated: false,
+  authBlocked: false,
 
   models: [],
   modelsLoading: false,
   sessionRefreshError: '',
-  prefs: Object.assign({ model: '', effort: '', approval: 'on-request', sandbox: 'workspace-write', cwd: '' }, store.prefs),
+  prefs: Object.assign({ approval: 'on-request', sandbox: 'workspace-write', cwd: '' }, store.prefs),
+  turnPrefs: { threadId: null, model: '', effort: '' },
 
   thread: null,          // current thread object
   threadSettings: null,  // model/effort etc from start/resume response
@@ -74,6 +82,14 @@ const state = {
   approvals: new Map(),  // rpcId -> approval entry
   lastDiff: '',
   tokenUsage: null,
+  account: null,
+  rateLimits: null,
+  localSends: new Map(),
+  nextLocalSendId: 1,
+  sendOperations: new Map(),
+  nextSendOperationId: 1,
+  pendingSendOperation: null,
+  turnUiEpoch: 0,
 
   term: {
     list: [],
@@ -91,16 +107,33 @@ const state = {
 const eventSync = ReconnectSync.create();
 const approvalFlow = ApprovalState.create();
 const ptySync = PtyReconnect.create({ baseDelayMs: 500, maxDelayMs: 10000 });
+const sendInstanceNonce = SendReliability.createInstanceNonce(globalThis.crypto);
+const deviceSession = DeviceSession.create();
 
-function savePrefs() { store.prefs = state.prefs; }
-
-/* ============================== transport ============================== */
-function wsUrl(path) {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://${location.host}${path}?token=${encodeURIComponent(store.token)}`;
+function savePrefs() {
+  const { model, effort, ...persistent } = state.prefs;
+  store.prefs = persistent;
 }
 
-function connectEvents() {
+function deviceCan(capability) {
+  return Boolean(state.device?.capabilities?.includes(capability));
+}
+
+function renderDeviceCapabilities() {
+  const canCreateTerminal = deviceCan('terminal.create');
+  $('#btn-new-codex-tui').hidden = !canCreateTerminal;
+  $('#btn-new-shell').hidden = !canCreateTerminal;
+  $('#btn-term-kill').hidden = !deviceCan('terminal.kill');
+  $('#chip-cwd').hidden = !deviceCan('fs.read');
+  $('#chip-approval').hidden = !deviceCan('approval.submit');
+  $('#chip-sandbox').hidden = !deviceCan('approval.submit');
+  $$('#keybar button').forEach((button) => {
+    button.disabled = !deviceCan('terminal.write');
+  });
+}
+
+/* ============================== transport ============================== */
+async function connectEvents() {
   const previousGeneration = eventSync.snapshot().generation;
   if (state.ws) {
     try { state.ws.close(); } catch {}
@@ -113,7 +146,23 @@ function connectEvents() {
   state.pendingReplayReset = null;
   const generation = eventSync.beginSocket();
   renderLinkState();
-  const ws = new WebSocket(wsUrl('/ws/events'));
+  let socketUrl;
+  try {
+    socketUrl = await deviceSession.websocketUrl('/ws/events', { channel: 'events' });
+  } catch (error) {
+    if (!eventSync.isCurrentGeneration(generation)) return;
+    state.wsAlive = false;
+    eventSync.onSocketClosed(generation);
+    renderLinkState();
+    if (error.status === 401 || error.status === 403) {
+      handleDeviceSessionExpired(error);
+      return;
+    }
+    scheduleEventReconnect(generation);
+    return;
+  }
+  if (!eventSync.isCurrentGeneration(generation)) return;
+  const ws = new WebSocket(socketUrl);
   state.ws = ws;
   ws.onopen = () => {
     if (!eventSync.isCurrentGeneration(generation) || state.ws !== ws) return;
@@ -121,7 +170,7 @@ function connectEvents() {
     connectEvents._retry = 800;
     renderLinkState();
   };
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     if (!eventSync.isCurrentGeneration(generation) || state.ws !== ws) return;
     state.wsAlive = false;
     state.ws = null;
@@ -132,10 +181,11 @@ function connectEvents() {
     rejectPendingRpcForGeneration(generation, new Error('连接已断开'));
     rejectTermCreateWaitersForGeneration(generation);
     renderLinkState();
-    const delay = Math.min((connectEvents._retry = (connectEvents._retry || 800) * 1.6), 12000);
-    setTimeout(() => {
-      if (store.token && eventSync.isCurrentGeneration(generation)) connectEvents();
-    }, delay);
+    if (!DeviceSession.shouldReconnect(event.code)) {
+      handleDeviceSessionExpired(new Error(event.reason || '设备会话已失效'));
+      return;
+    }
+    scheduleEventReconnect(generation);
   };
   ws.onerror = () => {};
   ws.onmessage = (ev) => {
@@ -144,6 +194,26 @@ function connectEvents() {
     try { msg = JSON.parse(ev.data); } catch { return; }
     handleGateway(msg, generation);
   };
+}
+
+function scheduleEventReconnect(generation) {
+  if (!state.sessionAuthenticated || state.authBlocked) return;
+  const delay = Math.min((connectEvents._retry = (connectEvents._retry || 800) * 1.6), 12000);
+  setTimeout(() => {
+    if (state.sessionAuthenticated && eventSync.isCurrentGeneration(generation)) connectEvents();
+  }, delay);
+}
+
+function handleDeviceSessionExpired(error) {
+  state.sessionAuthenticated = false;
+  state.authBlocked = true;
+  state.wsAlive = false;
+  $('#view-app').hidden = true;
+  $('#view-login').hidden = false;
+  const message = error?.message || '此设备的会话已过期或被撤销，请重新配对。';
+  const target = $('#pair-error');
+  target.textContent = message;
+  target.hidden = false;
 }
 
 function rpc(method, params, timeoutMs = 120000) {
@@ -159,7 +229,13 @@ function rpc(method, params, timeoutMs = 120000) {
       reject(new Error(`请求超时: ${method}`));
     }, timeoutMs);
     state.pendingRpc.set(reqId, { resolve, reject, timer, generation, method });
-    ws.send(JSON.stringify({ type: 'rpc', reqId, method, params }));
+    try {
+      ws.send(JSON.stringify({ type: 'rpc', reqId, method, params }));
+    } catch (error) {
+      state.pendingRpc.delete(reqId);
+      clearTimeout(timer);
+      reject(error);
+    }
   });
 }
 
@@ -217,6 +293,7 @@ async function handleReplayResult(msg, generation) {
   if (!result.accepted) return;
   if (!result.resetRequired) {
     applyEventSyncResult(result, generation);
+    reconcileUnknownLocalSends(generation).catch(() => {});
     return;
   }
 
@@ -243,16 +320,40 @@ async function finishCanonicalReset() {
     const thread = read.thread;
     const activeTurnId = canonicalActiveTurnId(thread);
     state.thread = { ...state.thread, ...thread };
+    reconcileLocalSendsWithCanonicalThread(thread, { final: false });
     renderHistory(thread, { includeInProgress: true });
     setTurnActive(activeTurnId);
     const completed = eventSync.completeReset(generation, {
       canonicalActiveTurnId: activeTurnId,
     });
     applyEventSyncResult(completed, generation);
+    reconcileUnknownLocalSends(generation).catch(() => {});
   } catch (error) {
     if (!eventSync.isCurrentGeneration(generation)) return;
     toast('同步会话失败：' + error.message, 4000);
     try { state.ws?.close(); } catch {}
+  }
+}
+
+async function reconcileUnknownLocalSends(generation = eventSync.snapshot().generation) {
+  const threadId = state.thread?.id;
+  if (!eventSync.isCurrentGeneration(generation)) return;
+  for (const operation of state.sendOperations.values()) {
+    if (
+      (
+        operation.status === 'unknown'
+        || (
+          operation.deliveryProven
+          && ['started', 'accepted'].includes(operation.status)
+        )
+      )
+      && (
+        operation.phase === 'starting-thread'
+        || operation.targetThreadId === threadId
+      )
+    ) {
+      beginUnknownSendReconciliation(operation);
+    }
   }
 }
 
@@ -271,7 +372,10 @@ function handleGateway(msg, generation = eventSync.snapshot().generation) {
   switch (msg.type) {
     case 'hello': {
       state.bridge = msg.bridge;
+      if (msg.device) state.device = msg.device;
       renderBridgeState();
+      renderDeviceCapabilities();
+      renderDeviceCard();
       state.term.list = msg.terminals || [];
       renderTermList();
       reconcileGatewayApprovals(msg.approvals);
@@ -288,7 +392,13 @@ function handleGateway(msg, generation = eventSync.snapshot().generation) {
       if (p && p.generation === generation) {
         state.pendingRpc.delete(msg.reqId);
         clearTimeout(p.timer);
-        msg.error ? p.reject(Object.assign(new Error(msg.error), { code: msg.code, data: msg.data })) : p.resolve(msg.result);
+        msg.error
+          ? p.reject(Object.assign(new Error(msg.error), {
+              code: msg.code,
+              data: msg.data,
+              rpcResponse: true,
+            }))
+          : p.resolve(msg.result);
       }
       break;
     }
@@ -360,12 +470,14 @@ function handleGateway(msg, generation = eventSync.snapshot().generation) {
 }
 
 async function onGatewayReady() {
+  reconcileUnknownLocalSends().catch(() => {});
   refreshStatusPage().catch(() => {});
   loadModels().then(renderModelBar).catch(() => {});
   if (!state.serverInfo) {
     try {
-      const r = await fetch('/api/status', { headers: { 'x-auth-token': store.token } });
+      const r = await fetch('/api/status', { credentials: 'same-origin' });
       state.serverInfo = await r.json();
+      if (state.serverInfo?.device) state.device = state.serverInfo.device;
       if (!state.prefs.cwd && state.serverInfo?.server) {
         // default working dir: user home reported later via directory browser
       }
@@ -410,26 +522,49 @@ function renderBridgeState() {
 
 /* ============================== login flow ============================== */
 async function tryPair(token) {
-  const res = await fetch('/api/pair', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ token }),
+  return deviceSession.pair(token, {
+    deviceName: globalThis.navigator?.userAgentData?.platform
+      || globalThis.navigator?.platform
+      || 'Phone browser',
+    platform: globalThis.navigator?.userAgent || 'browser',
   });
-  return res.ok;
 }
 
 async function boot() {
-  // token via URL fragment (QR flow): #token=xxx
-  const m = location.hash.match(/token=([^&]+)/);
-  if (m) {
-    store.token = decodeURIComponent(m[1]);
-    history.replaceState(null, '', location.pathname);
+  const fragment = location.hash.match(/(?:token|invite)=([^&]+)/);
+  const pairingCode = fragment
+    ? decodeURIComponent(fragment[1])
+    : store.legacyToken;
+  if (fragment) history.replaceState(null, '', location.pathname);
+
+  try {
+    const session = await deviceSession.loadSession();
+    store.clearLegacyToken();
+    enterApp(session.device);
+    return;
+  } catch (error) {
+    if (error.status && error.status !== 401) {
+      const target = $('#pair-error');
+      target.textContent = `无法连接网关：${error.message}`;
+      target.hidden = false;
+    }
   }
-  if (store.token && await tryPair(store.token).catch(() => false)) {
-    enterApp();
-  } else {
-    store.token = '';
-    $('#view-login').hidden = false;
+
+  if (pairingCode) {
+    try {
+      const paired = await tryPair(pairingCode);
+      store.clearLegacyToken();
+      enterApp(paired.device);
+      return;
+    } catch (error) {
+      const target = $('#pair-error');
+      target.textContent = error.status === 429
+        ? `尝试次数过多，请 ${error.retryAfter || '稍后'} 再试。`
+        : '配对码无效、已使用或已过期。';
+      target.hidden = false;
+    }
   }
+  $('#view-login').hidden = false;
 }
 
 $('#pair-form').addEventListener('submit', async (e) => {
@@ -438,24 +573,32 @@ $('#pair-form').addEventListener('submit', async (e) => {
   const err = $('#pair-error');
   err.hidden = true;
   if (!token) return;
-  if (await tryPair(token).catch(() => false)) {
-    store.token = token;
-    $('#view-login').hidden = true;
-    enterApp();
-  } else {
-    err.textContent = '令牌不正确，请重试。';
+  try {
+    const paired = await tryPair(token);
+    store.clearLegacyToken();
+    enterApp(paired.device);
+  } catch (error) {
+    err.textContent = error.status === 429
+      ? `尝试次数过多，请 ${error.retryAfter || '稍后'} 再试。`
+      : '配对码无效、已使用或已过期。';
     err.hidden = false;
   }
 });
 
-function enterApp() {
+function enterApp(device) {
+  state.device = device || deviceSession.snapshot().device;
+  state.sessionAuthenticated = true;
+  state.authBlocked = false;
   $('#view-login').hidden = true;
   $('#view-app').hidden = false;
+  renderDeviceCapabilities();
   connectEvents();
+  renderDeviceCard();
 }
 
-$('#btn-logout').addEventListener('click', () => {
-  store.token = '';
+$('#btn-logout').addEventListener('click', async () => {
+  try { await deviceSession.logout(); } catch {}
+  state.sessionAuthenticated = false;
   location.reload();
 });
 
@@ -532,9 +675,18 @@ $('#btn-new-thread').addEventListener('click', async () => {
   await newThread().catch((e) => toast('新建会话失败：' + e.message));
 });
 
-function threadStartOverrides() {
+function turnPrefsForThread(threadId = state.thread?.id || null) {
+  if (state.turnPrefs?.threadId !== threadId) return { model: '', effort: '' };
+  return state.turnPrefs;
+}
+
+function clearTurnPrefs() {
+  state.turnPrefs = { threadId: state.thread?.id || null, model: '', effort: '' };
+}
+
+function threadStartOverrides({ model } = {}) {
   const o = {};
-  if (state.prefs.model) o.model = state.prefs.model;
+  if (model) o.model = model;
   if (state.prefs.cwd) o.cwd = state.prefs.cwd;
   if (state.prefs.approval) o.approvalPolicy = state.prefs.approval;
   if (state.prefs.sandbox) o.sandbox = state.prefs.sandbox;
@@ -542,6 +694,7 @@ function threadStartOverrides() {
 }
 
 async function newThread() {
+  if (hasUnsettledSendOperation()) { toast('消息发送仍在确认，暂不能切换会话'); return; }
   if (mutationsLocked()) { toast('连接正在同步，请稍候'); return; }
   if (state.threadSwitching) return;
   await SessionSwitch.runThreadSwitch({
@@ -558,6 +711,7 @@ async function newThread() {
 }
 
 async function resumeThread(threadId) {
+  if (hasUnsettledSendOperation()) { toast('消息发送仍在确认，暂不能切换会话'); return; }
   if (eventSync.snapshot().status !== 'synced') { toast('连接正在同步，请稍候'); return; }
   if (state.threadSwitching || state.thread?.id === threadId) return;
   const tail = el('div', 'turn-status', '<span class="spin"></span> 正在载入会话…');
@@ -566,7 +720,7 @@ async function resumeThread(threadId) {
     await SessionSwitch.runThreadSwitch({
       setPending: setThreadSwitching,
       async load() {
-        const res = await rpc('thread/resume', Object.assign({ threadId }, threadStartOverrides(), { cwd: undefined }));
+        const res = await rpc('thread/resume', { threadId });
         const read = await rpc('thread/read', { threadId, includeTurns: true });
         return { res, thread: read.thread };
       },
@@ -590,6 +744,7 @@ function adoptThread(res, isNew) {
     approvalPolicy: res.approvalPolicy, sandbox: res.sandbox,
     cwd: res.cwd,
   };
+  clearTurnPrefs();
   state.activeTurnId = null;
   state.tokenUsage = null;
   eventSync.setActiveThread(state.thread?.id || null);
@@ -612,12 +767,17 @@ function syncCurrentThread() {
 
 function resetChat() {
   state.items.clear();
+  for (const operation of state.sendOperations.values()) operation.status = 'cancelled';
+  state.localSends.clear();
+  state.sendOperations.clear();
+  state.pendingSendOperation = null;
   state.activeTurnId = null;
   state.lastDiff = '';
   $('#chat-list').innerHTML = '';
   $('#chat-tail').innerHTML = '';
   $('#chat-empty').hidden = false;
   $('#btn-changes').hidden = true;
+  $('#changes-badge').hidden = true;
   updateSendButton();
 }
 
@@ -658,12 +818,18 @@ function renderHistory(thread, options = {}) {
       appendChat(el('div', 'turn-status err', `✗ ${esc(turn.error.message)}`));
     }
   }
+  for (const entry of state.localSends.values()) {
+    if (entry.threadId === thread.id && entry.status !== 'sent') appendChat(entry.bubble);
+  }
   scrollBottom(true);
   return canonicalActiveTurnId(thread);
 }
 
 /* ============================== chat sending ============================== */
 const input = $('#composer-input');
+input.value = store.draft;
+function persistComposerDraft() { store.draft = input.value; }
+input.addEventListener('input', persistComposerDraft);
 input.addEventListener('input', autoGrow);
 input.addEventListener('input', renderCommandSuggest);
 input.addEventListener('blur', () => {
@@ -729,12 +895,14 @@ function acceptCommandSuggestion(command) {
   const strip = $('#command-suggest');
   if (command.acceptsArgs) {
     input.value = command.command + ' ';
+    persistComposerDraft();
     autoGrow();
     renderCommandSuggest();
     input.focus();
     return;
   }
   input.value = '';
+  persistComposerDraft();
   autoGrow();
   if (strip) { strip.hidden = true; strip.innerHTML = ''; }
   input.blur(); // dismiss the mobile keyboard so the opened sheet is visible
@@ -747,6 +915,7 @@ $('#btn-send').addEventListener('click', () => {
 
 $$('.hint-chip').forEach((c) => c.addEventListener('click', () => {
   input.value = c.dataset.hint;
+  persistComposerDraft();
   autoGrow();
   input.focus();
 }));
@@ -754,7 +923,7 @@ $$('.hint-chip').forEach((c) => c.addEventListener('click', () => {
 function turnOverrides() {
   const o = SessionControls.resolveTurnModelOverrides({
     models: state.models,
-    prefs: state.prefs,
+    prefs: turnPrefsForThread(),
     threadSettings: state.threadSettings,
   });
   if (state.prefs.approval) o.approvalPolicy = state.prefs.approval;
@@ -815,6 +984,7 @@ async function sendMessage() {
   const localCommand = SessionControls.parseSlashCommand(text);
   if (localCommand) {
     input.value = '';
+    persistComposerDraft();
     autoGrow();
     renderCommandSuggest();
     await runLocalCommand(localCommand);
@@ -825,32 +995,550 @@ async function sendMessage() {
     toast(`未知命令 ${text.split(/\s+/)[0]}，输入 / 可查看全部命令`, 3600);
     return;
   }
-  input.value = '';
-  autoGrow();
-  renderCommandSuggest();
   await dispatchUserMessage(text);
 }
 
-async function dispatchUserMessage(text) {
+function clearComposerDraft(text) {
+  if (input.value.trim() !== text) return;
+  input.value = '';
+  persistComposerDraft();
+  autoGrow();
+  renderCommandSuggest();
+}
+
+function createLocalSend(text) {
+  const bubble = el('div', 'msg-user local-send sending');
+  const content = el('div', 'local-send-text', esc(text));
+  const status = el('div', 'local-send-status', '正在发送…');
+  const actions = el('div', 'local-send-actions');
+  actions.hidden = true;
+  const retry = el('button', 'send-retry', '重试');
+  retry.type = 'button';
+  const restore = el('button', 'send-restore', '恢复到输入框');
+  restore.type = 'button';
+  actions.appendChild(retry);
+  actions.appendChild(restore);
+  bubble.appendChild(content);
+  bubble.appendChild(status);
+  bubble.appendChild(actions);
+
+  const entry = {
+    id: `local-send-${state.nextLocalSendId++}`,
+    text,
+    status: 'sending',
+    threadId: state.thread?.id || null,
+    currentOperationId: null,
+    bubble,
+    statusNode: status,
+    actions,
+    retryButton: retry,
+    restoreButton: restore,
+  };
+  retry.addEventListener('click', () => retryLocalSend(entry));
+  restore.addEventListener('click', () => restoreLocalSendDraft(entry));
+  state.localSends.set(entry.id, entry);
+  appendChat(bubble);
+  return entry;
+}
+
+const SEND_TRANSITIONS = Object.freeze({
+  created: new Set(['starting-thread', 'starting-turn', 'failed', 'cancelled']),
+  'starting-thread': new Set(['starting-turn', 'unknown', 'unresolved', 'failed', 'cancelled']),
+  'starting-turn': new Set(['started', 'accepted', 'unknown', 'failed', 'cancelled']),
+  started: new Set(['accepted', 'cancelled']),
+  unknown: new Set(['started', 'accepted', 'unresolved', 'cancelled']),
+  unresolved: new Set(['started', 'accepted', 'cancelled']),
+  accepted: new Set(['cancelled']),
+  failed: new Set(),
+  cancelled: new Set(),
+});
+
+function transitionSendOperation(operation, nextStatus) {
+  if (operation.status === nextStatus) return true;
+  if (!SEND_TRANSITIONS[operation.status]?.has(nextStatus)) return false;
+  operation.status = nextStatus;
+  return true;
+}
+
+function isCurrentSendAttempt(operation) {
+  return operation
+    && operation.entry.currentOperationId === operation.id;
+}
+
+function isSendOperationCurrent(operation, { generation = true, thread = true } = {}) {
+  if (
+    state.pendingSendOperation !== operation
+    || !isCurrentSendAttempt(operation)
+  ) return false;
+  if (generation && !eventSync.isCurrentGeneration(operation.generation)) return false;
+  if (!thread) return true;
+  const currentThreadId = state.thread?.id || null;
+  return operation.targetThreadId
+    ? currentThreadId === operation.targetThreadId
+    : currentThreadId === operation.sourceThreadId;
+}
+
+function hasUnsettledSendOperation() {
+  return Boolean(
+    state.pendingSendOperation
+    && !['accepted', 'failed', 'cancelled'].includes(state.pendingSendOperation.status),
+  );
+}
+
+function createSendOperation(entry, overrides) {
+  const sequence = state.nextSendOperationId++;
+  const generation = eventSync.snapshot().generation;
+  const operation = {
+    id: `send-op-${generation}-${sequence}`,
+    clientUserMessageId: SendReliability.createClientUserMessageId({
+      instanceNonce: sendInstanceNonce,
+      generation,
+      sequence,
+    }),
+    generation,
+    sourceThreadId: state.thread?.id || null,
+    targetThreadId: state.thread?.id || null,
+    turnId: null,
+    deliveryProven: false,
+    startedTurnId: null,
+    phase: state.thread ? 'starting-turn' : 'starting-thread',
+    status: 'created',
+    threadRequestSent: false,
+    turnRequestSent: false,
+    reconcileAttempts: 0,
+    reconcileTimer: null,
+    reconcileRunning: false,
+    diffCleared: false,
+    initialTurnUiEpoch: state.turnUiEpoch,
+    overrides,
+    entry,
+  };
+  entry.currentOperationId = operation.id;
+  entry.threadId = operation.targetThreadId;
+  state.sendOperations.set(operation.id, operation);
+  state.pendingSendOperation = operation;
+  refreshMutationLocks();
+  return operation;
+}
+
+function finishSendOperation(operation, { retain = false } = {}) {
+  if (operation.reconcileTimer !== null) {
+    clearTimeout(operation.reconcileTimer);
+    operation.reconcileTimer = null;
+  }
+  operation.reconcileRunning = false;
+  if (state.pendingSendOperation === operation) state.pendingSendOperation = null;
+  if (!retain) {
+    state.sendOperations.delete(operation.id);
+    if (operation.entry.currentOperationId === operation.id) {
+      operation.entry.currentOperationId = null;
+    }
+  }
+  refreshMutationLocks();
+}
+
+function cancelSendOperation(operation) {
+  if (!transitionSendOperation(operation, 'cancelled')) return;
+  finishSendOperation(operation);
+}
+
+function markLocalSendSending(entry) {
+  entry.status = 'sending';
+  entry.bubble.classList.add('sending');
+  entry.bubble.classList.remove('failed', 'unknown');
+  entry.statusNode.hidden = false;
+  entry.statusNode.textContent = '正在发送…';
+  entry.actions.hidden = true;
+}
+
+function markLocalSendStarted(operation) {
+  if (!isCurrentSendAttempt(operation)) return;
+  const { entry } = operation;
+  entry.status = 'started';
+  entry.bubble.classList.add('sending');
+  entry.bubble.classList.remove('failed', 'unknown', 'unresolved');
+  entry.statusNode.hidden = false;
+  entry.statusNode.textContent = '回合已启动 · 已确认送达';
+  entry.actions.hidden = true;
+  entry.retryButton.hidden = true;
+}
+
+function markLocalSendAccepted(operation) {
+  if (!isCurrentSendAttempt(operation)) return;
+  const { entry } = operation;
+  entry.status = 'sent';
+  entry.bubble.classList.remove('sending', 'failed', 'unknown', 'unresolved');
+  entry.statusNode.hidden = true;
+  entry.actions.hidden = true;
+  entry.retryButton.hidden = true;
+  state.localSends.delete(entry.id);
+  finishSendOperation(operation, {
+    retain: operation.deliveryProven && Boolean(operation.startedTurnId),
+  });
+}
+
+function markLocalSendCompleted(operation) {
+  if (!isCurrentSendAttempt(operation)) return;
+  const { entry } = operation;
+  operation.status = 'accepted';
+  entry.status = 'sent';
+  entry.bubble.classList.remove('sending', 'failed', 'unknown', 'unresolved');
+  entry.statusNode.hidden = true;
+  entry.actions.hidden = true;
+  entry.retryButton.hidden = true;
+  state.localSends.delete(entry.id);
+  finishSendOperation(operation);
+}
+
+function restoreLocalSendDraft(entry) {
+  if (input.value.trim() && input.value.trim() !== entry.text) {
+    toast('输入框已有草稿；失败消息仍可稍后恢复');
+    return;
+  }
+  input.value = entry.text;
+  persistComposerDraft();
+  autoGrow();
+  renderCommandSuggest();
+  input.focus();
+}
+
+function clearComposerDraftForDeliveredOperation(operation) {
+  if (
+    operation.status !== 'unresolved'
+    || input.value !== operation.entry.text
+  ) return false;
+  input.value = '';
+  persistComposerDraft();
+  autoGrow();
+  renderCommandSuggest();
+  return true;
+}
+
+function markLocalSendFailed(operation, error) {
+  if (!isCurrentSendAttempt(operation)) return;
+  const { entry } = operation;
+  entry.status = 'failed';
+  entry.bubble.classList.remove('sending', 'unknown');
+  entry.bubble.classList.add('failed');
+  entry.statusNode.hidden = false;
+  entry.statusNode.textContent = `发送失败 · 未自动重试：${error.message}`;
+  entry.actions.hidden = false;
+  entry.retryButton.hidden = false;
+  entry.restoreButton.hidden = false;
+  restoreLocalSendDraft(entry);
+  finishSendOperation(operation);
+}
+
+function markLocalSendUnresolved(operation, reason) {
+  if (
+    !isCurrentSendAttempt(operation)
+    || !transitionSendOperation(operation, 'unresolved')
+  ) return;
+  const { entry } = operation;
+  entry.status = 'unresolved';
+  entry.bubble.classList.remove('sending', 'unknown');
+  entry.bubble.classList.add('unresolved');
+  entry.statusNode.hidden = false;
+  entry.statusNode.textContent = `结果未知 · ${reason}；未开放盲目重试`;
+  entry.actions.hidden = false;
+  entry.retryButton.hidden = true;
+  entry.restoreButton.hidden = false;
+  restoreLocalSendDraft(entry);
+  finishSendOperation(operation, { retain: true });
+}
+
+function markLocalSendUnknown(operation) {
+  if (!isCurrentSendAttempt(operation)) return;
+  const { entry } = operation;
+  entry.status = 'unknown';
+  entry.bubble.classList.remove('sending', 'failed', 'unresolved');
+  entry.bubble.classList.add('unknown');
+  entry.statusNode.hidden = false;
+  entry.statusNode.textContent = operation.phase === 'starting-thread'
+    ? '会话创建结果未知 · 正在对账'
+    : '结果未知 · 待对账后才能重试';
+  entry.actions.hidden = true;
+  refreshMutationLocks();
+  beginUnknownSendReconciliation(operation);
+}
+
+async function retryLocalSend(entry) {
+  if (entry.status !== 'failed') return;
+  await dispatchUserMessage(entry.text, entry);
+}
+
+function beginNewTurnUi(operation = null, { fromEvent = false } = {}) {
+  if (operation?.diffCleared) return;
+  if (
+    operation
+    && !fromEvent
+    && state.turnUiEpoch !== operation.initialTurnUiEpoch
+  ) return;
+  state.turnUiEpoch += 1;
+  state.lastDiff = '';
+  renderChangesBadge();
+  if (operation) operation.diffCleared = true;
+}
+
+function turnHasClientId(turn, clientId) {
+  return Boolean(
+    clientId
+    && (turn?.items || []).some(
+      (item) => item?.type === 'userMessage' && item.clientId === clientId,
+    ),
+  );
+}
+
+function operationForTurn(params) {
+  for (const operation of state.sendOperations.values()) {
+    if (operation.targetThreadId !== params?.threadId) continue;
+    if (
+      turnHasClientId(params.turn, operation.clientUserMessageId)
+      || (
+        operation.startedTurnId
+        && operation.startedTurnId === params?.turn?.id
+      )
+    ) return operation;
+  }
+  return null;
+}
+
+function reconcileLocalSendsWithCanonicalThread(thread, { final = true } = {}) {
+  if (!thread?.id) return false;
+  let resolved = false;
+  for (const operation of [...state.sendOperations.values()]) {
+    if (
+      !['unknown', 'unresolved', 'started', 'accepted'].includes(operation.status)
+      || operation.targetThreadId !== thread.id
+    ) continue;
+    const turn = (thread.turns || []).find((candidate) => (
+      turnHasClientId(candidate, operation.clientUserMessageId)
+      || (operation.startedTurnId && candidate.id === operation.startedTurnId)
+    ));
+    if (turn) {
+      clearComposerDraftForDeliveredOperation(operation);
+      operation.turnId = turn.id;
+      operation.deliveryProven = true;
+      operation.startedTurnId = turn.id;
+      resolved = true;
+      if (turn.status === 'inProgress') {
+        if (operation.status !== 'accepted') {
+          transitionSendOperation(operation, 'started');
+          markLocalSendStarted(operation);
+          finishSendOperation(operation, { retain: true });
+        }
+        if (state.thread?.id === thread.id) setTurnActive(turn.id);
+      } else {
+        markLocalSendCompleted(operation);
+        if (state.thread?.id === thread.id && state.activeTurnId === turn.id) {
+          setTurnActive(null);
+        }
+      }
+    } else if (
+      final
+      && !operation.deliveryProven
+      && operation.status === 'unknown'
+    ) {
+      resolved = true;
+      markLocalSendUnresolved(operation, 'canonical 未发现对应回合');
+    }
+  }
+  return resolved;
+}
+
+const SEND_RECONCILE_MAX_ATTEMPTS = 3;
+const SEND_RECONCILE_DELAY_MS = 250;
+
+function sendReconciliationHealthy() {
+  return state.wsAlive
+    && eventSync.snapshot().status === 'synced'
+    && state.bridge === 'ready';
+}
+
+function scheduleSendReconciliation(operation, poll) {
+  operation.reconcileTimer = setTimeout(() => {
+    operation.reconcileTimer = null;
+    poll(operation);
+  }, SEND_RECONCILE_DELAY_MS);
+}
+
+function pauseSendReconciliation(operation) {
+  operation.reconcileRunning = false;
+}
+
+function beginUnknownSendReconciliation(operation) {
+  if (
+    operation.phase === 'starting-thread'
+    && operation.status === 'unknown'
+  ) {
+    markLocalSendUnresolved(
+      operation,
+      '服务端未回显可关联 nonce，未认领任何新会话',
+    );
+    return;
+  }
+  if (
+    !(
+      operation.status === 'unknown'
+      || (
+        operation.deliveryProven
+        && ['started', 'accepted'].includes(operation.status)
+      )
+    )
+    || operation.reconcileRunning
+    || !sendReconciliationHealthy()
+  ) return;
+  operation.reconcileRunning = true;
+  operation.reconcileAttempts = 0;
+  pollUnknownTurn(operation);
+}
+
+function unknownTurnStillCurrent(operation, generation) {
+  return state.sendOperations.get(operation.id) === operation
+    && isCurrentSendAttempt(operation)
+    && (
+      operation.status === 'unknown'
+      || (
+        operation.deliveryProven
+        && ['started', 'accepted'].includes(operation.status)
+      )
+    )
+    && operation.phase === 'starting-turn'
+    && operation.targetThreadId === state.thread?.id
+    && eventSync.isCurrentGeneration(generation);
+}
+
+async function pollUnknownTurn(operation) {
+  if (!sendReconciliationHealthy()) {
+    operation.reconcileRunning = false;
+    return;
+  }
+  const generation = eventSync.snapshot().generation;
+  if (!unknownTurnStillCurrent(operation, generation)) {
+    operation.reconcileRunning = false;
+    return;
+  }
+  operation.reconcileAttempts += 1;
+  const final = operation.reconcileAttempts >= SEND_RECONCILE_MAX_ATTEMPTS;
+  try {
+    const read = await rpc('thread/read', {
+      threadId: operation.targetThreadId,
+      includeTurns: true,
+    });
+    if (!unknownTurnStillCurrent(operation, generation)) {
+      pauseSendReconciliation(operation);
+      return;
+    }
+    const resolved = reconcileLocalSendsWithCanonicalThread(read.thread, { final });
+    if (resolved) return;
+    if (!unknownTurnStillCurrent(operation, generation)) {
+      pauseSendReconciliation(operation);
+      return;
+    }
+  } catch {
+    if (!unknownTurnStillCurrent(operation, generation)) {
+      pauseSendReconciliation(operation);
+      return;
+    }
+    if (final) {
+      if (operation.deliveryProven) {
+        operation.reconcileRunning = false;
+      } else {
+        markLocalSendUnresolved(operation, '无法读取 canonical 会话状态');
+      }
+      return;
+    }
+  }
+  if (final) {
+    if (operation.deliveryProven) {
+      operation.reconcileRunning = false;
+    } else if (operation.status === 'unknown') {
+      markLocalSendUnresolved(operation, 'canonical 会话状态无有效结果');
+    }
+    return;
+  }
+  scheduleSendReconciliation(operation, pollUnknownTurn);
+}
+
+async function dispatchUserMessage(text, existingEntry = null) {
   if (mutationsLocked()) { toast('连接正在同步，请稍候'); return; }
   if (state.threadSwitching) { toast('会话正在切换，请稍候'); return; }
   if (state.bridge !== 'ready') { toast('Codex 引擎未就绪，请稍候'); return; }
+  if (state.activeTurnId) { toast('当前回合仍在进行，请先等待或中断'); return; }
+  if (hasUnsettledSendOperation()) { toast('上一条消息仍在确认，请稍候'); return; }
+  const localSend = existingEntry || createLocalSend(text);
+  const capturedOverrides = turnOverrides();
+  const operation = createSendOperation(localSend, capturedOverrides);
+  markLocalSendSending(localSend);
+  clearComposerDraft(text);
+  $('#chat-empty').hidden = true;
+  scrollBottom(true);
+  setTurnActive('pending');
   try {
     if (!state.thread) {
-      const res = await rpc('thread/start', threadStartOverrides());
+      transitionSendOperation(operation, 'starting-thread');
+      operation.threadRequestSent = true;
+      const res = await rpc('thread/start', threadStartOverrides({
+        model: capturedOverrides.model,
+      }));
+      if (!isSendOperationCurrent(operation)) {
+        cancelSendOperation(operation);
+        return;
+      }
+      if (!res.thread?.id) throw new Error('thread/start 未返回会话 ID');
+      operation.targetThreadId = res.thread.id;
+      localSend.threadId = res.thread.id;
       adoptThread(res, true);
+      if (!isSendOperationCurrent(operation)) {
+        cancelSendOperation(operation);
+        return;
+      }
     }
-    $('#chat-empty').hidden = true;
-    appendChat(el('div', 'msg-user', esc(text)));
-    scrollBottom(true);
+    if (!operation.targetThreadId) operation.targetThreadId = state.thread.id;
+    if (!transitionSendOperation(operation, 'starting-turn')) return;
     setTurnActive('pending');
-    await rpc('turn/start', Object.assign({
+    operation.turnRequestSent = true;
+    const result = await rpc('turn/start', Object.assign({
       threadId: state.thread.id,
+      clientUserMessageId: operation.clientUserMessageId,
       input: [{ type: 'text', text, text_elements: [] }],
-    }, turnOverrides()), 30 * 60 * 1000);
+    }, capturedOverrides), 30 * 60 * 1000);
+    if (!isSendOperationCurrent(operation)) {
+      cancelSendOperation(operation);
+      return;
+    }
+    const resultTurnId = result?.turn?.id || result?.id || null;
+    if (operation.turnId && resultTurnId && operation.turnId !== resultTurnId) {
+      if (transitionSendOperation(operation, 'unknown')) markLocalSendUnknown(operation);
+      return;
+    }
+    if (resultTurnId) operation.turnId = resultTurnId;
+    operation.deliveryProven = true;
+    if (resultTurnId) operation.startedTurnId = resultTurnId;
+    beginNewTurnUi(operation);
+    if (transitionSendOperation(operation, 'accepted')) markLocalSendAccepted(operation);
   } catch (e) {
-    setTurnActive(null);
-    toast('发送失败：' + e.message);
+    if (!isCurrentSendAttempt(operation)) return;
+    if (state.activeTurnId === 'pending') setTurnActive(null);
+    const errorClass = SendReliability.classifyTurnStartError(e);
+    const contradictoryStarted = operation.status === 'started';
+    const uncertainThreadCreation = operation.phase === 'starting-thread'
+      && operation.threadRequestSent
+      && errorClass === 'unknown';
+    const uncertainTurnStart = operation.phase === 'starting-turn'
+      && operation.turnRequestSent
+      && (errorClass === 'unknown' || contradictoryStarted);
+    if (operation.deliveryProven) {
+      finishSendOperation(operation, { retain: true });
+      beginUnknownSendReconciliation(operation);
+      toast('回合已启动，RPC 结果矛盾，正在对账', 4000);
+    } else if (uncertainThreadCreation || uncertainTurnStart) {
+      if (transitionSendOperation(operation, 'unknown')) markLocalSendUnknown(operation);
+      toast('发送结果未知，正在等待重连对账', 4000);
+    } else if (transitionSendOperation(operation, 'failed')) {
+      markLocalSendFailed(operation, e);
+      toast('发送失败：' + e.message);
+    }
   }
 }
 
@@ -890,7 +1578,8 @@ function mutationsLocked() {
   return !state.wsAlive
     || eventSync.snapshot().status !== 'synced'
     || state.bridge !== 'ready'
-    || state.threadSwitching;
+    || state.threadSwitching
+    || hasUnsettledSendOperation();
 }
 
 function refreshMutationLocks() {
@@ -930,10 +1619,23 @@ function isCurrentThread(params) {
   return state.thread && params && (params.threadId === state.thread.id || params.thread?.id === state.thread.id);
 }
 
+function mergeSparseUpdate(previous, update) {
+  if (update === undefined || update === null) return previous;
+  if (Array.isArray(update) || typeof update !== 'object') return update;
+  const result = previous && typeof previous === 'object' && !Array.isArray(previous)
+    ? { ...previous }
+    : {};
+  for (const [key, value] of Object.entries(update)) {
+    if (value === undefined || value === null) continue;
+    result[key] = mergeSparseUpdate(result[key], value);
+  }
+  return result;
+}
+
 function handleCodexEvent(method, params, replay = false) {
   // Session-global signals
   if (method === 'account/rateLimits/updated') {
-    state.rateLimits = params;
+    state.rateLimits = mergeSparseUpdate(state.rateLimits, params);
     renderOpenSessionStatus();
     return;
   }
@@ -956,10 +1658,33 @@ function handleCodexEvent(method, params, replay = false) {
   if (!isCurrentThread(params)) return;
 
   switch (method) {
-    case 'turn/started':
+    case 'turn/started': {
+      const operation = operationForTurn(params);
+      if (operation) {
+        clearComposerDraftForDeliveredOperation(operation);
+        operation.deliveryProven = true;
+        operation.startedTurnId = params.turn.id;
+        operation.turnId = params.turn.id;
+        beginNewTurnUi(operation, { fromEvent: true });
+        if (operation.status !== 'accepted') {
+          transitionSendOperation(operation, 'started');
+          markLocalSendStarted(operation);
+        }
+      } else {
+        beginNewTurnUi(null, { fromEvent: true });
+      }
       setTurnActive(params.turn.id);
       break;
+    }
     case 'turn/completed': {
+      const operation = operationForTurn(params);
+      if (operation) {
+        clearComposerDraftForDeliveredOperation(operation);
+        operation.deliveryProven = true;
+        operation.startedTurnId = params.turn.id;
+        operation.turnId = params.turn.id;
+        markLocalSendCompleted(operation);
+      }
       setTurnActive(null);
       const t = params.turn;
       if (t.status === 'failed' && t.error) appendChat(el('div', 'turn-status err', `✗ ${esc(t.error.message)}`));
@@ -967,10 +1692,18 @@ function handleCodexEvent(method, params, replay = false) {
       scrollBottom();
       break;
     }
-    case 'error':
+    case 'error': {
+      const operation = [...state.sendOperations.values()].find((candidate) => (
+        candidate.deliveryProven
+        && candidate.targetThreadId === params.threadId
+        && candidate.startedTurnId
+        && candidate.startedTurnId === params.turnId
+      ));
+      if (operation) markLocalSendCompleted(operation);
       appendChat(el('div', 'turn-status err', `✗ ${esc(params.error?.message || '未知错误')}${params.willRetry ? '（自动重试中）' : ''}`));
       scrollBottom();
       break;
+    }
     case 'item/started':
       onItemStarted(params.item);
       break;
@@ -998,7 +1731,10 @@ function handleCodexEvent(method, params, replay = false) {
       renderOpenSessionStatus();
       break;
     case 'thread/name/updated':
-      if (state.thread) state.thread.name = params.name;
+      if (state.thread) {
+        const threadName = params.threadName ?? params.name;
+        if (threadName !== undefined) state.thread.name = threadName;
+      }
       renderExecutionContext();
       renderOpenSessionStatus();
       break;
@@ -1601,7 +2337,7 @@ function renderModelBar() {
   if (!button) return;
   const selection = SessionControls.resolveModelSelection({
     models: state.models,
-    prefs: state.prefs,
+    prefs: turnPrefsForThread(),
     threadSettings: state.threadSettings,
   });
   $('#model-current').textContent = selection.displayName;
@@ -1667,7 +2403,13 @@ function renderModelPicker(panel, models) {
   panel.className = '';
   panel.innerHTML = '';
   const visible = SessionControls.getVisibleModels(models);
-  const currentModel = state.prefs.model || state.threadSettings?.model || '';
+  const turnPrefs = turnPrefsForThread();
+  const selection = SessionControls.resolveModelSelection({
+    models,
+    prefs: turnPrefs,
+    threadSettings: state.threadSettings,
+  });
+  const currentModel = selection.selectedModel;
   const head = el('div', 'model-picker-head');
   head.innerHTML = '<span>选择将用于下一回合的模型</span>';
   const refresh = el('button', 'model-picker-refresh', '刷新目录');
@@ -1680,11 +2422,17 @@ function renderModelPicker(panel, models) {
   panel.appendChild(head);
 
   const list = el('div', 'model-picker-list');
-  const defaultRow = optRow('默认模型', '跟随本机 Codex 配置', !state.prefs.model);
+  const defaultRow = optRow(
+    '默认模型',
+    '显式切回本机 Codex 默认模型',
+    turnPrefs.model === SessionControls.LOCAL_MODEL_DEFAULT,
+  );
   defaultRow.addEventListener('click', () => {
-    state.prefs.model = '';
-    state.prefs.effort = '';
-    savePrefs();
+    state.turnPrefs = {
+      threadId: state.thread?.id || null,
+      model: SessionControls.LOCAL_MODEL_DEFAULT,
+      effort: SessionControls.LOCAL_EFFORT_DEFAULT,
+    };
     renderChips();
     renderModelPicker(panel, models);
   });
@@ -1693,9 +2441,13 @@ function renderModelPicker(panel, models) {
     const slug = model.model || model.id;
     const row = optRow(model.displayName || slug, model.description, currentModel === slug);
     row.addEventListener('click', () => {
-      state.prefs.model = slug;
-      state.prefs.effort = SessionControls.reconcileEffort(models, slug, state.prefs.effort);
-      savePrefs();
+      state.turnPrefs = {
+        threadId: state.thread?.id || null,
+        model: slug,
+        effort: turnPrefs.effort === SessionControls.LOCAL_EFFORT_DEFAULT
+          ? SessionControls.LOCAL_EFFORT_DEFAULT
+          : SessionControls.reconcileEffort(models, slug, turnPrefs.effort),
+      };
       renderChips();
       renderModelPicker(panel, models);
     });
@@ -1703,25 +2455,34 @@ function renderModelPicker(panel, models) {
   }
   panel.appendChild(list);
 
-  const selectedModel = state.prefs.model || state.threadSettings?.model || '';
+  const selectedModel = selection.selectedModel;
   const efforts = SessionControls.getEffortOptions(models, selectedModel);
   const effortPanel = el('div', 'effort-picker');
   effortPanel.innerHTML = `<div class="effort-picker-title"><span>推理强度</span><span>${efforts.length ? '来自实时模型目录' : '该模型未提供选项'}</span></div>`;
   const options = el('div', 'effort-options');
-  const automatic = el('button', 'effort-option' + (!state.prefs.effort ? ' selected' : ''), '默认');
+  const automatic = el(
+    'button',
+    'effort-option' + (
+      !turnPrefs.effort || turnPrefs.effort === SessionControls.LOCAL_EFFORT_DEFAULT
+        ? ' selected'
+        : ''
+    ),
+    '默认',
+  );
   automatic.addEventListener('click', () => {
-    state.prefs.effort = '';
-    savePrefs();
+    state.turnPrefs = {
+      ...turnPrefsForThread(),
+      effort: SessionControls.LOCAL_EFFORT_DEFAULT,
+    };
     renderChips();
     renderModelPicker(panel, models);
   });
   options.appendChild(automatic);
   for (const effort of efforts) {
-    const option = el('button', 'effort-option' + (state.prefs.effort === effort.id ? ' selected' : ''), effort.id);
+    const option = el('button', 'effort-option' + (turnPrefs.effort === effort.id ? ' selected' : ''), effort.id);
     option.title = effort.description;
     option.addEventListener('click', () => {
-      state.prefs.effort = effort.id;
-      savePrefs();
+      state.turnPrefs = { ...turnPrefsForThread(), effort: effort.id };
       renderChips();
       renderModelPicker(panel, models);
     });
@@ -1739,7 +2500,7 @@ function renderSessionDetail(root) {
   const snapshot = SessionControls.createSessionSnapshot({
     thread: state.thread,
     threadSettings: state.threadSettings,
-    prefs: state.prefs,
+    prefs: { ...state.prefs, ...turnPrefsForThread() },
     tokenUsage: state.tokenUsage,
     account: state.account,
     rateLimits: state.rateLimits,
@@ -1859,6 +2620,7 @@ function openCommandHelp() {
         sheet.close();
         if (command.acceptsArgs) {
           input.value = command.command + ' ';
+          persistComposerDraft();
           autoGrow();
           renderCommandSuggest();
           input.focus();
@@ -2108,6 +2870,7 @@ function parentPath(p) {
 }
 
 $('#chip-cwd').addEventListener('click', () => {
+  if (!deviceCan('fs.read')) { toast('当前设备没有浏览本机目录的权限'); return; }
   const start = state.prefs.cwd || state.threadSettings?.cwd || state.serverInfo?.server?.home || 'C:\\';
   openDirBrowser(start);
 });
@@ -2192,6 +2955,7 @@ async function openDirBrowser(startPath) {
 const termCreateWaiters = new Map();
 function createTerminal(kind) {
   return new Promise((resolve, reject) => {
+    if (!deviceCan('terminal.create')) return reject(new Error('当前设备没有创建终端的权限'));
     if (mutationsLocked()) return reject(new Error('连接正在同步'));
     const reqId = state.reqId++;
     const generation = eventSync.snapshot().generation;
@@ -2279,7 +3043,8 @@ function openTerminal(t) {
         setCtrlLatch(false);
       }
       if (
-        state.term.ws?.readyState === WebSocket.OPEN
+        deviceCan('terminal.write')
+        && state.term.ws?.readyState === WebSocket.OPEN
         && ptySync.snapshot().status === 'live'
       ) state.term.ws.send(data);
     });
@@ -2289,12 +3054,40 @@ function openTerminal(t) {
   setTimeout(fitTerm, 60);
 }
 
-function connectTermWs(id, options = {}) {
+async function connectTermWs(id, options = {}) {
   clearTimeout(state.term.reconnectTimer);
   if (state.term.ws) { try { state.term.ws.close(); } catch {} }
   const generation = ptySync.begin(id, { retry: !!options.retry });
   renderTermConnectionState();
-  const ws = new WebSocket(wsUrl(`/ws/term/${id}`));
+  let socketUrl;
+  try {
+    socketUrl = await deviceSession.websocketUrl(`/ws/term/${id}`, {
+      channel: 'terminal',
+      termId: String(id),
+    });
+  } catch (error) {
+    if (!ptySync.isCurrentGeneration(generation)) return;
+    if (error.status === 401 || error.status === 403) {
+      ptySync.stop('authorization');
+      renderTermConnectionState('权限已失效');
+      handleDeviceSessionExpired(error);
+      return;
+    }
+    const action = ptySync.onSocketClose(generation, {
+      code: 1006,
+      reason: error.message,
+    });
+    renderTermConnectionState();
+    if (action.reconnect && state.term.current === String(id) && !$('#term-view').hidden) {
+      state.term.reconnectTimer = setTimeout(
+        () => connectTermWs(id, { retry: true }),
+        action.delayMs,
+      );
+    }
+    return;
+  }
+  if (!ptySync.isCurrentGeneration(generation)) return;
+  const ws = new WebSocket(socketUrl);
   ws.binaryType = 'arraybuffer';
   state.term.ws = ws;
   ws.onmessage = (ev) => {
@@ -2320,6 +3113,17 @@ function connectTermWs(id, options = {}) {
   ws.onclose = (event) => {
     if (!ptySync.isCurrentGeneration(generation) || state.term.ws !== ws) return;
     state.term.ws = null;
+    if (event.code === 4408) {
+      ptySync.stop('read-only');
+      renderTermConnectionState('只读观察');
+      return;
+    }
+    if (!DeviceSession.shouldReconnect(event.code)) {
+      ptySync.stop('authorization');
+      renderTermConnectionState('权限已失效');
+      handleDeviceSessionExpired(new Error(event.reason || '设备权限已失效'));
+      return;
+    }
     const action = ptySync.onSocketClose(generation, {
       code: event.code,
       reason: event.reason,
@@ -2391,6 +3195,7 @@ function closeTerminalView(intent) {
 }
 
 $('#btn-term-kill').addEventListener('click', () => {
+  if (!deviceCan('terminal.kill')) { toast('当前设备没有结束终端的权限'); return; }
   if (!state.term.current) return;
   const id = state.term.current;
   ptySync.stop('kill');
@@ -2409,6 +3214,7 @@ $('#keybar').addEventListener('click', (e) => {
   const seq = btn.dataset.seq;
   if (
     seq
+    && deviceCan('terminal.write')
     && state.term.ws?.readyState === WebSocket.OPEN
     && ptySync.snapshot().status === 'live'
   ) {
@@ -2421,8 +3227,13 @@ $('#keybar').addEventListener('click', (e) => {
 async function refreshStatusPage() {
   renderStatusCards();
   try {
-    const r = await fetch('/api/status', { headers: { 'x-auth-token': store.token } });
+    const r = await fetch('/api/status', { credentials: 'same-origin' });
+    if (r.status === 401 || r.status === 403) {
+      handleDeviceSessionExpired(new Error('此设备已过期或被撤销'));
+      return;
+    }
     state.serverInfo = await r.json();
+    if (state.serverInfo?.device) state.device = state.serverInfo.device;
     renderStatusCards();
   } catch {}
   try {
@@ -2433,6 +3244,7 @@ async function refreshStatusPage() {
     state.rateLimits = await rpc('account/rateLimits/read');
   } catch {}
   renderAccountCard();
+  renderDeviceCard();
 }
 
 function statRow(k, v, cls = '') {
@@ -2453,6 +3265,7 @@ function renderStatusCards() {
     (si?.bridge?.init?.userAgent ? statRow('版本', esc(si.bridge.init.userAgent)) : '') +
     (si?.server ? statRow('主机', esc(`${si.server.host} (${si.server.platform})`)) : '');
   $('#app-version').textContent = si?.server?.version || '0.1';
+  renderDeviceCard();
   renderShareCard();
 }
 
@@ -2466,16 +3279,19 @@ function renderAccountCard() {
   html = html || statRow('账户', '加载中…');
   // Context usage & account quota live in the chat page session panel (/status).
   html += statRow('额度与上下文', '对话页输入 /status 查看');
-  html += `<div class="acct-actions"><button class="btn-ghost" id="btn-acct-login">登录 / 切换账号</button></div>`;
+  if (deviceCan('account.manage')) {
+    html += `<div class="acct-actions"><button class="btn-ghost" id="btn-acct-login">登录 / 切换账号</button></div>`;
+  }
   c.innerHTML = html;
-  $('#btn-acct-login', c).addEventListener('click', openLoginSheet);
+  $('#btn-acct-login', c)?.addEventListener('click', openLoginSheet);
 }
 
 /* ---------- 手机端登录 / 切换账号 ---------- */
 async function apiPost(path, payload) {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-auth-token': store.token },
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload || {}),
   });
   let data = {};
@@ -2485,6 +3301,7 @@ async function apiPost(path, payload) {
 }
 
 function openLoginSheet() {
+  if (!deviceCan('account.manage')) { toast('仅 Owner 设备可以管理 Codex 账户'); return; }
   sheet.open('登录 / 切换账号', (body) => {
     const acc = optRow('ChatGPT 账号登录', '打开官方授权页登录账号，与电脑上 codex login 相同', false);
     acc.addEventListener('click', async () => {
@@ -2598,14 +3415,103 @@ function showApiKeySheet() {
   });
 }
 
+function deviceScopeLabel(scope) {
+  return {
+    'chat-only': '仅聊天',
+    'read-only': '只读观察',
+    'full-control': '完整控制',
+  }[scope] || scope || '未知';
+}
+
+function renderDeviceCard() {
+  const card = $('#card-devices');
+  if (!card) return;
+  const device = state.device || deviceSession.snapshot().device;
+  if (!device) {
+    card.innerHTML = statRow('当前设备', '未认证', 'warn');
+    return;
+  }
+  let html =
+    statRow('当前设备', esc(device.name || device.id || '已配对')) +
+    statRow('权限范围', esc(deviceScopeLabel(device.scope))) +
+    statRow('设备角色', device.owner ? 'Owner' : '成员');
+  if (device.owner) {
+    html += '<div class="acct-actions"><button class="btn-ghost" id="btn-manage-devices">管理已配对设备</button></div>';
+  }
+  card.innerHTML = html;
+  $('#btn-manage-devices', card)?.addEventListener('click', openDeviceManager);
+}
+
+async function openDeviceManager() {
+  sheet.open('已配对设备', (body) => {
+    body.innerHTML = '<div class="thread-loading">载入中…</div>';
+    deviceSession.listDevices().then(({ devices }) => {
+      body.innerHTML = '';
+      for (const device of devices || []) {
+        const row = el('div', 'device-row');
+        const current = device.id === state.device?.deviceId || device.id === state.device?.id;
+        row.innerHTML = `
+          <div class="device-main">
+            <strong>${esc(device.name || device.id)}</strong>
+            <span>${esc(deviceScopeLabel(device.scope))}${device.owner ? ' · Owner' : ''}${current ? ' · 当前设备' : ''}</span>
+          </div>
+          ${!current && !device.revokedAt ? '<button class="btn-ghost danger-text" data-revoke>撤销</button>' : ''}
+        `;
+        $('[data-revoke]', row)?.addEventListener('click', async () => {
+          const button = $('[data-revoke]', row);
+          button.disabled = true;
+          try {
+            await deviceSession.revokeDevice(device.id);
+            row.remove();
+            toast('设备访问已撤销');
+          } catch (error) {
+            button.disabled = false;
+            toast('撤销失败：' + error.message, 4000);
+          }
+        });
+        body.appendChild(row);
+      }
+    }).catch((error) => {
+      body.innerHTML = `<div class="thread-loading">加载失败：${esc(error.message)}</div>`;
+    });
+  });
+}
+
 function renderShareCard() {
   const c = $('#card-share');
   const addrs = state.serverInfo?.server?.addrs || [];
-  if (!addrs.length) { c.innerHTML = statRow('局域网', '未检测到地址', 'warn'); return; }
-  const url = `http://${addrs[0]}:${state.serverInfo.server.port}/#token=${encodeURIComponent(store.token)}`;
+  if (!state.device?.owner) {
+    c.innerHTML = statRow('分享权限', '仅 Owner 可创建设备邀请');
+    return;
+  }
+  if (!addrs.length) {
+    c.innerHTML = statRow('局域网', '未检测到地址', 'warn');
+    return;
+  }
   c.innerHTML = `
-    <div class="share-qr"><img src="/api/qr?token=${encodeURIComponent(store.token)}" width="164" height="164" alt="QR"></div>
-    <div class="share-tip">让另一台手机扫码即可接入。二维码包含访问令牌，请勿外传。<br>局域网地址：${addrs.map((a) => `<span class="mono">${esc(a)}</span>`).join(' / ')}</div>`;
+    <div id="share-invite-result"></div>
+    <div class="share-actions">
+      <button class="btn-ghost" data-invite-scope="chat-only">创建仅聊天邀请</button>
+      <button class="btn-ghost" data-invite-scope="read-only">创建只读邀请</button>
+      <button class="btn-primary" data-invite-scope="full-control">创建完整控制邀请</button>
+    </div>
+    <div class="share-tip">邀请 5 分钟内有效且只能使用一次。完整控制可操作本机文件与终端，请仅发给可信设备。<br>局域网地址：${addrs.map((a) => `<span class="mono">${esc(a)}</span>`).join(' / ')}</div>`;
+  $$('[data-invite-scope]', c).forEach((button) => button.addEventListener('click', async () => {
+    const buttons = $$('[data-invite-scope]', c);
+    buttons.forEach((entry) => { entry.disabled = true; });
+    try {
+      const invite = await deviceSession.createInvite(button.dataset.inviteScope);
+      const holder = $('#share-invite-result', c);
+      holder.innerHTML = `
+        <div class="share-qr"><img src="/api/qr?invite=${encodeURIComponent(invite.code)}" width="164" height="164" alt="一次性设备配对二维码"></div>
+        <div class="device-invite-code mono">${esc(invite.code)}</div>
+        <div class="share-tip">权限：${esc(deviceScopeLabel(invite.scope))} · 5 分钟内使用一次</div>`;
+    } catch (error) {
+      toast('创建邀请失败：' + error.message, 4000);
+    } finally {
+      buttons.forEach((entry) => { entry.disabled = false; });
+    }
+  }));
 }
 
 /* ============================== boot ============================== */

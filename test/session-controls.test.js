@@ -131,6 +131,95 @@ test('distinguishes active model settings from pending next-turn overrides', () 
   });
 });
 
+test('resolves next-turn model and reasoning effort from explicit preferences then catalog defaults', () => {
+  assert.equal(
+    typeof SessionControls?.resolveTurnModelOverrides,
+    'function',
+    'turn model override helper is missing',
+  );
+  const models = [
+    {
+      model: 'gpt-a',
+      isDefault: true,
+      defaultReasoningEffort: 'medium',
+    },
+    {
+      model: 'gpt-b',
+      defaultReasoningEffort: 'low',
+    },
+  ];
+
+  assert.deepEqual(SessionControls.resolveTurnModelOverrides({
+    models,
+    prefs: { model: 'gpt-b', effort: '' },
+    threadSettings: { model: 'gpt-a', effort: 'high' },
+  }), {
+    model: 'gpt-b',
+    effort: 'low',
+  });
+  assert.deepEqual(SessionControls.resolveTurnModelOverrides({
+    models,
+    prefs: { model: 'gpt-b', effort: 'high' },
+    threadSettings: { model: 'gpt-a', effort: 'medium' },
+  }), {
+    model: 'gpt-b',
+    effort: 'high',
+  });
+});
+
+test('explicit local-default sentinel overrides the active thread with catalog defaults', () => {
+  assert.equal(
+    typeof SessionControls?.LOCAL_MODEL_DEFAULT,
+    'string',
+    'local-default model sentinel is missing',
+  );
+  const models = [
+    { model: 'gpt-current', defaultReasoningEffort: 'high' },
+    { model: 'gpt-default', isDefault: true, defaultReasoningEffort: 'medium' },
+  ];
+
+  assert.deepEqual(SessionControls.resolveTurnModelOverrides({
+    models,
+    prefs: { model: SessionControls.LOCAL_MODEL_DEFAULT, effort: '' },
+    threadSettings: { model: 'gpt-current', effort: 'high' },
+  }), {
+    model: 'gpt-default',
+    effort: 'medium',
+  });
+});
+
+test('local-default sentinel remains pending when only the default effort differs', () => {
+  const selection = SessionControls.resolveModelSelection({
+    models: [{ model: 'gpt-default', isDefault: true, defaultReasoningEffort: 'medium' }],
+    prefs: { model: SessionControls.LOCAL_MODEL_DEFAULT, effort: '' },
+    threadSettings: { model: 'gpt-default', effort: 'high' },
+  });
+
+  assert.equal(selection.selectedModel, 'gpt-default');
+  assert.equal(selection.selectedEffort, 'medium');
+  assert.equal(selection.pending, true);
+});
+
+test('explicit default effort sentinel restores the catalog default from active high', () => {
+  assert.equal(
+    typeof SessionControls?.LOCAL_EFFORT_DEFAULT,
+    'string',
+    'default effort sentinel is missing',
+  );
+  assert.deepEqual(SessionControls.resolveTurnModelOverrides({
+    models: [{
+      model: 'gpt-current',
+      isDefault: true,
+      defaultReasoningEffort: 'medium',
+    }],
+    prefs: { model: '', effort: SessionControls.LOCAL_EFFORT_DEFAULT },
+    threadSettings: { model: 'gpt-current', effort: 'high' },
+  }), {
+    model: 'gpt-current',
+    effort: 'medium',
+  });
+});
+
 test('builds session detail with context remaining and explicitly account-scoped quota', () => {
   assert.equal(typeof SessionControls?.createSessionSnapshot, 'function', 'session snapshot helper is missing');
   const snapshot = SessionControls.createSessionSnapshot({

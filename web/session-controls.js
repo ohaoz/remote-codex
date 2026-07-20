@@ -5,6 +5,9 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.SessionControls = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, () => {
+  const LOCAL_MODEL_DEFAULT = '__local_default__';
+  const LOCAL_EFFORT_DEFAULT = '__default_effort__';
+
   /**
    * Slash commands implemented by this client, mirroring the Codex CLI
    * command palette. Commands with `acceptsArgs` take free text after the
@@ -176,17 +179,27 @@
     const active = threadSettings || {};
     const catalogDefault = findModel(models, '');
     const activeModel = active.model || '';
-    const selectedModel = preferences.model || activeModel || modelId(catalogDefault);
+    const explicitLocalDefault = preferences.model === LOCAL_MODEL_DEFAULT;
+    const selectedModel = explicitLocalDefault
+      ? (modelId(catalogDefault) || activeModel)
+      : (preferences.model || activeModel || modelId(catalogDefault));
     const selectedCatalogModel = findModel(models, selectedModel);
     const activeEffort = active.effort || '';
-    const selectedEffort = preferences.effort
-      || (selectedModel === activeModel ? activeEffort : '')
-      || selectedCatalogModel?.defaultReasoningEffort
-      || '';
-    const pending = Boolean(
-      (preferences.model && preferences.model !== activeModel)
-      || (preferences.effort && preferences.effort !== activeEffort),
-    );
+    const explicitDefaultEffort = preferences.effort === LOCAL_EFFORT_DEFAULT;
+    const selectedEffort = explicitDefaultEffort
+      ? (selectedCatalogModel?.defaultReasoningEffort || activeEffort)
+      : (
+        preferences.effort
+        || (!explicitLocalDefault && selectedModel === activeModel ? activeEffort : '')
+        || selectedCatalogModel?.defaultReasoningEffort
+        || ''
+      );
+    const pending = explicitLocalDefault || explicitDefaultEffort
+      ? selectedModel !== activeModel || selectedEffort !== activeEffort
+      : Boolean(
+        (preferences.model && selectedModel !== activeModel)
+        || (preferences.effort && preferences.effort !== activeEffort),
+      );
 
     return {
       activeModel,
@@ -196,6 +209,14 @@
       displayName: selectedCatalogModel?.displayName || selectedModel || '默认模型',
       pending,
     };
+  }
+
+  function resolveTurnModelOverrides(options = {}) {
+    const selection = resolveModelSelection(options);
+    const overrides = {};
+    if (selection.selectedModel) overrides.model = selection.selectedModel;
+    if (selection.selectedEffort) overrides.effort = selection.selectedEffort;
+    return overrides;
   }
 
   function clampPercent(value) {
@@ -311,6 +332,8 @@
   }
 
   return {
+    LOCAL_EFFORT_DEFAULT,
+    LOCAL_MODEL_DEFAULT,
     parseSlashCommand,
     matchCommands,
     isSlashLike,
@@ -319,6 +342,7 @@
     getEffortOptions,
     reconcileEffort,
     resolveModelSelection,
+    resolveTurnModelOverrides,
     createSessionSnapshot,
   };
 });

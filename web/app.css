@@ -284,6 +284,32 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   padding: 11px 15px; font-size: 15px; line-height: 1.55;
   white-space: pre-wrap; word-break: break-word;
 }
+.msg-user.local-send.sending { opacity: 0.78; }
+.msg-user.local-send.failed {
+  border: 1px solid var(--danger-border);
+  background: var(--danger-dim);
+}
+.msg-user.local-send.unknown {
+  border: 1px solid var(--accent-border);
+  background: var(--accent-dim);
+}
+.msg-user.local-send.unresolved {
+  border: 1px solid var(--accent-border);
+  background: var(--accent-dim);
+}
+.local-send-status {
+  margin-top: 6px; color: var(--faint);
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.4;
+}
+.local-send.failed .local-send-status { color: var(--danger); }
+.local-send.unknown .local-send-status { color: var(--accent); }
+.local-send.unresolved .local-send-status { color: var(--accent); }
+.local-send-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
+.local-send-actions button {
+  border: 1px solid currentColor; border-radius: 8px;
+  padding: 5px 9px; color: var(--danger); font-size: 11.5px;
+}
+.local-send-actions .send-restore { color: var(--dim); }
 
 /* --- 智能体消息(markdown) --- */
 .msg-agent {
@@ -629,6 +655,22 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
 .share-qr { display: flex; justify-content: center; padding: 13px 0; }
 .share-qr canvas, .share-qr img { border-radius: 10px; background: #fff; padding: 8px; border: 1px solid var(--line-soft); }
 .share-tip { color: var(--faint); font-size: 12px; line-height: 1.6; padding-bottom: 12px; }
+.share-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
+.share-actions .btn-ghost, .share-actions .btn-primary { flex: 1; min-width: 130px; }
+.device-invite-code {
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface2); font-size: 11px; line-height: 1.45;
+  word-break: break-all; user-select: all; margin-bottom: 8px;
+}
+.device-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 11px 8px; border-top: 1px solid var(--line-soft);
+}
+.device-row:first-child { border-top: none; }
+.device-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.device-main strong { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-main span { color: var(--faint); font-size: 11.5px; }
+.device-row .btn-ghost { flex: none; padding: 8px 10px; font-size: 12px; }
 /* 目录选择器 */
 .dir-quick { display: flex; gap: 7px; flex-wrap: wrap; padding: 2px 4px 12px; }
 .dir-bar { padding: 0 4px 10px; }

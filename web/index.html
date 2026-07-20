@@ -24,16 +24,16 @@
       <svg class="spark login-spark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v20M2 12h20M5.8 5.8l12.4 12.4M18.2 5.8L5.8 18.2" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" fill="none"/></svg>
       <div class="mark-eyebrow">REMOTE COCKPIT · 手机驾驶舱</div>
       <h1 class="wordmark">codex<span class="wm-sep">://</span>remote<span class="cursor-block"></span></h1>
-      <p class="login-sub">连接这台电脑上的 Codex CLI。在电脑启动窗口扫码，或手动输入访问令牌。</p>
+      <p class="login-sub">连接这台电脑上的 Codex CLI。在电脑启动窗口扫码，或输入一次性配对码。</p>
     </div>
     <form id="pair-form" class="pair-form" autocomplete="off">
-      <label class="field-label" for="pair-token">访问令牌 TOKEN</label>
-      <input id="pair-token" class="pair-input" type="password" placeholder="粘贴电脑端显示的令牌"
+      <label class="field-label" for="pair-token">一次性配对码</label>
+      <input id="pair-token" class="pair-input" type="password" placeholder="粘贴电脑端显示的迁移码或邀请"
              autocapitalize="off" autocorrect="off" spellcheck="false">
       <button class="btn-primary" type="submit">建立连接</button>
       <p id="pair-error" class="pair-error" hidden></p>
     </form>
-    <footer class="login-foot">同一局域网内使用 · 令牌保存在本机浏览器</footer>
+    <footer class="login-foot">同一局域网内使用 · 配对码一次有效 · 设备可单独撤销</footer>
   </div>
 </section>
 
@@ -168,9 +168,11 @@
       <div class="status-card" id="card-link"></div>
       <div class="mark-eyebrow">ACCOUNT · 账户</div>
       <div class="status-card" id="card-account"></div>
+      <div class="mark-eyebrow">DEVICES · 设备与权限</div>
+      <div class="status-card" id="card-devices"></div>
       <div class="mark-eyebrow">SHARE · 分享接入</div>
       <div class="status-card" id="card-share"></div>
-      <button id="btn-logout" class="btn-ghost danger-text">断开并清除本机令牌</button>
+      <button id="btn-logout" class="btn-ghost danger-text">退出此设备</button>
       <div class="status-foot mono">codex://remote v<span id="app-version">0.1</span></div>
     </div>
   </main>
@@ -218,11 +220,13 @@
 <script src="/vendor/purify.js"></script>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
+<script src="/device-session.js"></script>
 <script src="/session-switch.js"></script>
 <script src="/reconnect.js"></script>
 <script src="/approval-state.js"></script>
 <script src="/pty-reconnect.js"></script>
 <script src="/session-controls.js"></script>
+<script src="/send-reliability.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

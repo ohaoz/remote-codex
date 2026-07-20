@@ -85,7 +85,7 @@ test('a reused approval rpc id rebuilds the card for the new request lifecycle',
 });
 
 test('gateway uses structured approval protocol and terminal sync frames', () => {
-  const server = read('server/index.js');
+  const server = read('server/gateway.js') + read('server/terminals.js');
   const app = read('web/app.js');
   assert.match(server, /submitApproval\(/);
   assert.match(server, /submissionId/);

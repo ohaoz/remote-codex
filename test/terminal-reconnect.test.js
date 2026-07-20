@@ -11,6 +11,11 @@ try {
 } catch {}
 
 class FakePty extends EventEmitter {
+  constructor() {
+    super();
+    this.killCalls = 0;
+  }
+
   onData(handler) {
     this.on('data', handler);
   }
@@ -21,7 +26,9 @@ class FakePty extends EventEmitter {
 
   write() {}
   resize() {}
-  kill() {}
+  kill() {
+    this.killCalls += 1;
+  }
 }
 
 test('terminal snapshots include generation and absolute output watermarks', () => {
@@ -73,6 +80,27 @@ test('terminal sync frames bracket ANSI replay exactly once', () => {
     generation: 4,
     lastOffset: 17,
   });
+});
+
+test('terminal manager dispose kills every PTY exactly once', () => {
+  const processes = [];
+  const manager = new TerminalManager({
+    spawn: () => {
+      const proc = new FakePty();
+      processes.push(proc);
+      return proc;
+    },
+  });
+  manager.create('shell');
+  manager.create('shell');
+
+  assert.equal(typeof manager.dispose, 'function', 'terminal manager dispose is missing');
+  manager.dispose();
+  manager.dispose();
+
+  assert.deepEqual(processes.map((proc) => proc.killCalls), [1, 1]);
+  assert.deepEqual(manager.list(), []);
+  assert.throws(() => manager.create('shell'), /disposed|closed|stopped/i);
 });
 
 test('PTY reconnect resets once per snapshot and ignores stale sockets', () => {

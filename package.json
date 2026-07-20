@@ -1,9 +1,17 @@
 {
   "name": "codex-remote",
   "version": "0.1.0",
-  "private": true,
   "description": "Control your local Codex CLI from your phone - streaming chat UI plus a full PTY terminal.",
   "main": "server/index.js",
+  "bin": {
+    "codex-remote": "bin/codex-remote.js"
+  },
+  "files": [
+    "bin/",
+    "server/",
+    "web/",
+    "README.md"
+  ],
   "scripts": {
     "start": "node server/index.js",
     "test": "node --test"

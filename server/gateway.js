@@ -791,7 +791,7 @@ function createGateway(options = {}) {
       type: 'bridge-status',
       state,
       streamId: bridge.streamId,
-      approvals: bridge.listPendingApprovals(),
+      approvals: canAccess(principal, 'approval.read') ? bridge.listPendingApprovals() : [],
       ...extra,
     });
     const onTermCreated = () => {

@@ -1,0 +1,12 @@
+{
+  "name": "Codex Remote",
+  "short_name": "Codex",
+  "description": "手机远程控制本机 Codex CLI",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FAF9F5",
+  "theme_color": "#FAF9F5",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

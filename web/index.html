@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#FAF9F5">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#262624">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>codex://remote</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/session-controls.css">
+</head>
+<body>
+
+<!-- ============================= 配对 / 登录 ============================= -->
+<section id="view-login" class="view" hidden>
+  <div class="login-stage">
+    <div class="login-mark">
+      <svg class="spark login-spark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v20M2 12h20M5.8 5.8l12.4 12.4M18.2 5.8L5.8 18.2" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" fill="none"/></svg>
+      <div class="mark-eyebrow">REMOTE COCKPIT · 手机驾驶舱</div>
+      <h1 class="wordmark">codex<span class="wm-sep">://</span>remote<span class="cursor-block"></span></h1>
+      <p class="login-sub">连接这台电脑上的 Codex CLI。在电脑启动窗口扫码，或手动输入访问令牌。</p>
+    </div>
+    <form id="pair-form" class="pair-form" autocomplete="off">
+      <label class="field-label" for="pair-token">访问令牌 TOKEN</label>
+      <input id="pair-token" class="pair-input" type="password" placeholder="粘贴电脑端显示的令牌"
+             autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button class="btn-primary" type="submit">建立连接</button>
+      <p id="pair-error" class="pair-error" hidden></p>
+    </form>
+    <footer class="login-foot">同一局域网内使用 · 令牌保存在本机浏览器</footer>
+  </div>
+</section>
+
+<!-- ============================= 主应用 ============================= -->
+<section id="view-app" class="view" hidden>
+
+  <!-- 顶部遥测条 -->
+  <header class="topbar">
+    <button id="btn-drawer" class="icon-btn" aria-label="会话列表">
+      <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+    </button>
+    <div class="telemetry" id="telemetry">
+      <span class="pulse-dot" id="link-dot"></span>
+      <span class="tele-host mono" id="tele-host">连接中…</span>
+      <span class="tele-chip mono" id="tele-model" hidden></span>
+    </div>
+    <button id="btn-changes" class="icon-btn" aria-label="本回合变更" hidden>
+      <svg viewBox="0 0 24 24"><path d="M6 3v12m0 0a3 3 0 1 0 3 3M6 15a3 3 0 0 1 3 3m9-12a3 3 0 1 1-3-3m3 3a3 3 0 0 1-3 3m0 0v3a3 3 0 0 1-3 3"/></svg>
+      <i id="changes-badge" class="badge" hidden></i>
+    </button>
+  </header>
+
+  <!-- ============ 对话页 ============ -->
+  <main id="page-chat" class="page">
+    <div id="chat-scroll" class="chat-scroll">
+      <div id="chat-empty" class="chat-empty">
+        <svg class="spark empty-spark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v20M2 12h20M5.8 5.8l12.4 12.4M18.2 5.8L5.8 18.2" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" fill="none"/></svg>
+        <div class="wordmark sm">codex<span class="wm-sep">://</span>remote<span class="cursor-block"></span></div>
+        <p>新建会话，或从左上角恢复历史会话。</p>
+        <div class="hint-chips">
+          <button class="hint-chip" data-hint="总结一下这个项目的结构">总结项目结构</button>
+          <button class="hint-chip" data-hint="检查 git 状态并说明未提交的修改">查看 git 状态</button>
+          <button class="hint-chip" data-hint="帮我修复最近一次报错">修复报错</button>
+        </div>
+      </div>
+      <div id="chat-list" class="chat-list"></div>
+      <div id="chat-tail" class="chat-tail"></div>
+    </div>
+
+    <!-- 审批停靠区 -->
+    <div id="approval-dock" class="approval-dock"></div>
+
+    <!-- 输入区 -->
+    <div class="composer">
+      <div class="execution-context" id="execution-context" aria-live="polite">
+        <span class="exec-session" id="exec-session">新会话</span>
+        <span class="exec-sep">·</span>
+        <span class="exec-cwd mono" id="exec-cwd">默认目录</span>
+      </div>
+      <div class="session-controls" id="session-controls">
+        <button id="btn-session-status" class="session-control-icon" type="button" aria-label="打开并刷新会话状态">
+          <svg id="session-status-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13a8 8 0 1 1 16 0M12 13l3.2-3.2M8.5 19h7"/></svg>
+          <span id="context-ring" class="context-ring" aria-hidden="true" hidden><b id="context-ring-value"></b></span>
+        </button>
+        <button id="btn-model-switch" class="model-switch" type="button" aria-label="切换模型与推理强度" aria-live="polite">
+          <span class="model-switch-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 2v20M2 12h20M5.8 5.8l12.4 12.4M18.2 5.8L5.8 18.2" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" fill="none"/></svg>
+          </span>
+          <span class="model-switch-copy">
+            <span class="model-switch-label" id="model-switch-label">当前模型</span>
+            <span class="model-switch-name" id="model-current">默认模型</span>
+          </span>
+          <span class="model-switch-effort" id="effort-current">默认推理</span>
+          <svg class="model-switch-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 10l4 4 4-4"/></svg>
+        </button>
+        <button id="btn-command-help" class="session-control-icon" type="button" aria-label="查看可用斜杠命令">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5L5 12l4 7M15 5l4 7-4 7"/></svg>
+        </button>
+      </div>
+      <div class="chip-row" id="chip-row">
+        <button class="chip" id="chip-cwd">目录</button>
+        <button class="chip" id="chip-approval">审批</button>
+        <button class="chip" id="chip-sandbox">沙箱</button>
+      </div>
+      <div id="command-suggest" class="command-suggest" role="listbox" aria-label="斜杠命令建议" hidden></div>
+      <div class="composer-bar">
+        <textarea id="composer-input" class="composer-input" rows="1"
+          placeholder="给 Codex 下指令…" enterkeyhint="send"></textarea>
+        <button id="btn-send" class="send-btn" aria-label="发送">
+          <svg viewBox="0 0 24 24" class="ico-send"><path d="M5 12L3 4l18 8L3 20l2-8zm0 0h7"/></svg>
+          <svg viewBox="0 0 24 24" class="ico-stop" hidden><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ 终端页 ============ -->
+  <main id="page-term" class="page" hidden>
+    <div id="term-home" class="term-home">
+      <div class="term-home-head">
+        <span class="mark-eyebrow">TERMINALS · 终端会话</span>
+        <p class="term-home-sub">在真实 PTY 里运行完整的 Codex TUI，或打开系统 Shell。</p>
+      </div>
+      <div id="term-list" class="term-list"></div>
+      <div class="term-actions">
+        <button id="btn-new-codex-tui" class="btn-primary">▶ 启动 Codex TUI</button>
+        <button id="btn-new-shell" class="btn-ghost">$ 打开 PowerShell</button>
+      </div>
+    </div>
+    <div id="term-view" class="term-view" hidden>
+      <div class="term-toolbar">
+        <button id="btn-term-back" class="icon-btn" aria-label="返回">
+          <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <span class="term-title-wrap">
+          <span id="term-title" class="term-title mono">Codex TUI</span>
+          <span id="term-connection-status" class="term-connection-status mono" data-state="idle">未连接</span>
+        </span>
+        <button id="btn-term-kill" class="icon-btn danger" aria-label="结束会话">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <div id="xterm-holder" class="xterm-holder"></div>
+      <div class="keybar" id="keybar">
+        <button data-seq="&#27;">Esc</button>
+        <button data-seq="&#9;">Tab</button>
+        <button data-ctrl="1" id="key-ctrl">Ctrl</button>
+        <button data-seq="&#27;[A">↑</button>
+        <button data-seq="&#27;[B">↓</button>
+        <button data-seq="&#27;[D">←</button>
+        <button data-seq="&#27;[C">→</button>
+        <button data-seq="&#3;">^C</button>
+        <button data-seq="&#13;">⏎</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ 状态页 ============ -->
+  <main id="page-status" class="page" hidden>
+    <div class="status-scroll" id="status-scroll">
+      <div class="mark-eyebrow">CONTROL LINK · 链路状态</div>
+      <div class="status-card" id="card-link"></div>
+      <div class="mark-eyebrow">ACCOUNT · 账户</div>
+      <div class="status-card" id="card-account"></div>
+      <div class="mark-eyebrow">SHARE · 分享接入</div>
+      <div class="status-card" id="card-share"></div>
+      <button id="btn-logout" class="btn-ghost danger-text">断开并清除本机令牌</button>
+      <div class="status-foot mono">codex://remote v<span id="app-version">0.1</span></div>
+    </div>
+  </main>
+
+  <!-- 底部导航 -->
+  <nav class="tabbar">
+    <button class="tab active" data-page="chat">
+      <svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H4l2.5-2.5A8 8 0 1 1 21 12z"/></svg>
+      <span>对话</span>
+      <i id="tab-chat-badge" class="badge" hidden></i>
+    </button>
+    <button class="tab" data-page="term">
+      <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 9l3 3-3 3M12 15h5"/></svg>
+      <span>终端</span>
+    </button>
+    <button class="tab" data-page="status">
+      <svg viewBox="0 0 24 24"><path d="M4 13a8 8 0 1 1 16 0M12 13l3-3M6 19h12"/></svg>
+      <span>状态</span>
+    </button>
+  </nav>
+
+  <!-- ============ 会话抽屉 ============ -->
+  <div id="drawer-mask" class="drawer-mask" hidden></div>
+  <aside id="drawer" class="drawer">
+    <div class="drawer-head">
+      <span class="wordmark xs">codex<span class="wm-sep">://</span>remote</span>
+    </div>
+    <button id="btn-new-thread" class="btn-primary drawer-new">＋ 新建会话</button>
+    <div class="drawer-label mark-eyebrow">SESSIONS · 历史会话</div>
+    <div id="thread-list" class="thread-list"><div class="thread-loading">载入中…</div></div>
+  </aside>
+
+  <!-- ============ 通用底部弹层 ============ -->
+  <div id="sheet-mask" class="sheet-mask" hidden></div>
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet-grip"></div>
+    <div id="sheet-title" class="sheet-title"></div>
+    <div id="sheet-body" class="sheet-body"></div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+</section>
+
+<script src="/vendor/marked.js"></script>
+<script src="/vendor/purify.js"></script>
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/session-switch.js"></script>
+<script src="/reconnect.js"></script>
+<script src="/approval-state.js"></script>
+<script src="/pty-reconnect.js"></script>
+<script src="/session-controls.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

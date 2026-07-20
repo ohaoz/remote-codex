@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="116" fill="#FAF9F5"/>
+  <rect x="70" y="70" width="372" height="372" rx="84" fill="none" stroke="#DFDCD0" stroke-width="10"/>
+  <text x="150" y="325" font-family="Cascadia Code, Menlo, monospace" font-size="190" font-weight="700" fill="#1F1E1D">&gt;</text>
+  <rect x="272" y="196" width="88" height="140" rx="10" fill="#D97757"/>
+</svg>

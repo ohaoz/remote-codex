@@ -502,6 +502,54 @@ test('failed browser send restores the draft and exposes manual recovery actions
   assert.equal(app.document.querySelector('#composer-input').value, '');
 });
 
+test('live user messages from other devices render while own echoes stay deduplicated', async () => {
+  const app = loadBrowserApp();
+  const list = app.document.querySelector('#chat-list');
+
+  app.wire.emitEvent('item/started', {
+    threadId: 'thread-1',
+    turnId: 'turn-remote',
+    item: {
+      type: 'userMessage',
+      id: 'remote-user-1',
+      clientId: 'another-device-nonce-1-1',
+      content: [{ type: 'text', text: '来自另一台设备的消息' }],
+    },
+  });
+  await app.flush();
+  assert.equal(list.children.length, 1, 'a foreign live user message must render');
+  assert.match(list.children[0].innerHTML, /来自另一台设备的消息/);
+  assert.ok(list.children[0].classList.contains('msg-user'));
+
+  app.wire.outcome = 'manual';
+  app.document.querySelector('#composer-input').value = 'my own message';
+  const sending = app.evaluate('sendMessage()');
+  await app.flush();
+  const request = app.requests.find((entry) => entry.method === 'turn/start');
+  assert.equal(list.children.length, 2, 'sending appends exactly one local bubble');
+
+  app.wire.emitEvent('item/started', {
+    threadId: 'thread-1',
+    turnId: 'turn-own',
+    item: {
+      type: 'userMessage',
+      id: 'own-user-1',
+      clientId: request.params.clientUserMessageId,
+      content: [{ type: 'text', text: 'my own message' }],
+    },
+  });
+  await app.flush();
+  assert.equal(
+    list.children.length,
+    2,
+    'the live echo of an own message must not duplicate the local bubble',
+  );
+
+  app.wire.resolveNext('turn/start');
+  await sending;
+  assert.equal(list.children.length, 2);
+});
+
 test('official thread names and sparse account limit events merge into live browser state', () => {
   const app = loadBrowserApp();
   app.evaluate(`

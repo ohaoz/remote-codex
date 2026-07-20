@@ -88,6 +88,7 @@ const state = {
   nextLocalSendId: 1,
   sendOperations: new Map(),
   nextSendOperationId: 1,
+  sentClientMessageIds: new Set(),
   pendingSendOperation: null,
   turnUiEpoch: 0,
 
@@ -770,6 +771,7 @@ function resetChat() {
   for (const operation of state.sendOperations.values()) operation.status = 'cancelled';
   state.localSends.clear();
   state.sendOperations.clear();
+  state.sentClientMessageIds.clear();
   state.pendingSendOperation = null;
   state.activeTurnId = null;
   state.lastDiff = '';
@@ -1117,6 +1119,10 @@ function createSendOperation(entry, overrides) {
   entry.threadId = operation.targetThreadId;
   state.sendOperations.set(operation.id, operation);
   state.pendingSendOperation = operation;
+  // Remember our own client message id so the live userMessage echo is
+  // deduplicated against the local bubble (see renderItem). Messages from
+  // other devices carry a clientId we never issued and are rendered.
+  state.sentClientMessageIds.add(operation.clientUserMessageId);
   refreshMutationLocks();
   return operation;
 }
@@ -1771,9 +1777,14 @@ function onItemCompleted(item) {
 
 function renderItem(item, completed, fromHistory = false) {
   switch (item.type) {
-    // Live userMessage items are skipped: the composer already appended the
-    // bubble locally when the user hit send.
-    case 'userMessage': return fromHistory ? renderUserItem(item) : undefined;
+    // History always renders. For live items, skip only the echo of a message
+    // this client sent (its local bubble already shows it); user messages from
+    // other devices sharing the session carry a clientId we never issued and
+    // are rendered so multi-device viewers stay in sync.
+    case 'userMessage':
+      return (fromHistory || !isOwnClientMessage(item))
+        ? renderUserItem(item)
+        : undefined;
     case 'agentMessage': return renderAgentItem(item, completed);
     case 'reasoning': return renderThoughtItem(item, completed);
     case 'commandExecution': return renderCmdItem(item, completed);
@@ -1790,6 +1801,10 @@ function renderItem(item, completed, fromHistory = false) {
 }
 
 function renderCompletedItem(item) { renderItem(item, true, true); }
+
+function isOwnClientMessage(item) {
+  return Boolean(item?.clientId && state.sentClientMessageIds.has(item.clientId));
+}
 
 function renderUserItem(item) {
   const text = (item.content || []).map((c) => c.type === 'text' ? c.text : `[${c.type}]`).join('\n');
@@ -2177,23 +2192,36 @@ function buildApprovalCard(entry) {
     const cmd = method === 'execCommandApproval' ? (params.command || []).join(' ') : (params.command || '');
     const isLegacy = method === 'execCommandApproval';
     const cwd = params.cwd || entry.context?.cwd;
+    const map = isLegacy
+      ? { yes: { decision: 'approved' }, 'yes-session': { decision: 'approved_for_session' }, no: { decision: 'denied' } }
+      : { yes: { decision: 'accept' }, 'yes-session': { decision: 'acceptForSession' }, no: { decision: 'decline' } };
+    const buttons = [
+      { d: 'yes', cls: 'yes', label: '允许' },
+      { d: 'yes-session', cls: 'yes-all', label: '本会话均允许' },
+      { d: 'no', cls: 'no', label: '拒绝' },
+    ];
+    // Codex may narrow the decisions a client is allowed to offer for this
+    // prompt (v2 availableDecisions). Only show those buttons so a tap can
+    // never be rejected by the gateway's server-side approval validation.
+    const available = Array.isArray(params.availableDecisions)
+      ? params.availableDecisions.filter((value) => typeof value === 'string')
+      : [];
+    const visible = available.length
+      ? buttons.filter((button) => available.includes(map[button.d].decision))
+      : buttons;
+    const actions = (visible.length ? visible : buttons)
+      .map((button) => `<button class="appr-btn ${button.cls}" data-d="${button.d}">${button.label}</button>`)
+      .join('');
     card.innerHTML = `
       <div class="approval-kicker">approval · 命令执行请求</div>
       <div class="approval-title">Codex 请求运行命令</div>
       <pre class="approval-cmd">${esc(cmd)}</pre>
       ${params.reason ? `<div class="approval-reason">${esc(params.reason)}</div>` : ''}
       ${cwd ? `<div class="approval-reason mono">目录：${esc(cwd)}</div>` : ''}
-      <div class="approval-actions">
-        <button class="appr-btn yes" data-d="yes">允许</button>
-        <button class="appr-btn yes-all" data-d="yes-session">本会话均允许</button>
-        <button class="appr-btn no" data-d="no">拒绝</button>
-      </div>`;
+      <div class="approval-actions">${actions}</div>`;
     card.addEventListener('click', (e) => {
       const d = e.target.closest('[data-d]')?.dataset.d;
-      if (!d) return;
-      const map = isLegacy
-        ? { yes: { decision: 'approved' }, 'yes-session': { decision: 'approved_for_session' }, no: { decision: 'denied' } }
-        : { yes: { decision: 'accept' }, 'yes-session': { decision: 'acceptForSession' }, no: { decision: 'decline' } };
+      if (!d || !map[d]) return;
       decide(entry.rpcId, map[d]);
     });
     return card;

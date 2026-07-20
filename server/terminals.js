@@ -5,6 +5,8 @@ const pty = require('@lydell/node-pty');
 const { findCodexExe } = require('./codex');
 
 const SCROLLBACK_LIMIT = 400000; // chars kept per terminal for replay
+const MAX_LIVE_SESSIONS = 16;    // concurrent PTYs a gateway will host
+const MAX_DEAD_SESSIONS = 8;     // exited sessions retained for replay/list
 
 function encodeTerminalControl(message) {
   return `\u0000${JSON.stringify(message)}`;
@@ -55,6 +57,8 @@ class TerminalManager extends EventEmitter {
     this.nextGeneration = 1;
     this.spawn = options.spawn || ((file, args, spawnOptions) => pty.spawn(file, args, spawnOptions));
     this.scrollbackLimit = Math.max(1, options.scrollbackLimit || SCROLLBACK_LIMIT);
+    this.maxLiveSessions = Math.max(1, options.maxLiveSessions || MAX_LIVE_SESSIONS);
+    this.maxDeadSessions = Math.max(0, options.maxDeadSessions ?? MAX_DEAD_SESSIONS);
     this.now = options.now || Date.now;
     this.disposed = false;
   }
@@ -78,8 +82,30 @@ class TerminalManager extends EventEmitter {
     return { file: process.env.SHELL || '/bin/bash', args: ['-l'], label };
   }
 
+  /**
+   * Scrollback buffers cost up to `scrollbackLimit` chars per session, so an
+   * unbounded session count is an easy memory DoS. Live PTYs are capped and
+   * old exited sessions are recycled (oldest first) once the retention limit
+   * is reached.
+   */
+  _pruneDeadSessions() {
+    const dead = [...this.sessions.values()]
+      .filter((session) => !session.alive)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    while (dead.length > this.maxDeadSessions) {
+      const victim = dead.shift();
+      this.sessions.delete(victim.id);
+      this.emit('closed', victim.id);
+    }
+  }
+
   create(kind = 'codex', opts = {}) {
     if (this.disposed) throw new Error('terminal manager is disposed');
+    this._pruneDeadSessions();
+    const liveCount = [...this.sessions.values()].filter((session) => session.alive).length;
+    if (liveCount >= this.maxLiveSessions) {
+      throw new Error(`终端数量已达上限（${this.maxLiveSessions} 个），请先结束不用的会话`);
+    }
     const id = String(this.nextId++);
     const spec = this._shellSpec(kind, opts);
     const cwd = opts.cwd && typeof opts.cwd === 'string' ? opts.cwd : os.homedir();
@@ -118,6 +144,7 @@ class TerminalManager extends EventEmitter {
     proc.onExit(({ exitCode }) => {
       session.alive = false;
       this.emit('exit', id, exitCode);
+      this._pruneDeadSessions();
     });
     this.sessions.set(id, session);
     this.emit('created', this.describe(session));

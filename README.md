@@ -5,7 +5,7 @@
 | 模式 | 说明 |
 | --- | --- |
 | **对话模式** | 原生手机聊天界面。流式回复、推理摘要、命令/补丁/MCP 工具卡片、审批一键放行、会话恢复/新建、模型切换条与斜杠命令面板（`/status` `/model` `/review` `/compact` `/mcp` 等，与 Codex CLI 同源）、会话内上下文与额度仪表。基于 `codex app-server` 协议（与 VS Code 插件同源），支持 Codex 全部核心能力。 |
-| **终端模式** | 真实 PTY 里跑完整的 **Codex TUI**（以及 PowerShell）。xterm.js 渲染 + 快捷键条（Esc/Tab/Ctrl/方向键/^C），TUI 的所有交互（/status、/model、审批弹窗、resume 选择器等）原样可用。断线重连自动回放屏幕。 |
+| **终端模式** | 真实 PTY 里跑完整的 **Codex TUI**（以及系统 Shell：Windows 上是 PowerShell，macOS/Linux 上是 `$SHELL`）。xterm.js 渲染 + 快捷键条（Esc/Tab/Ctrl/方向键/^C）+ 字号调节，TUI 的所有交互（/status、/model、审批弹窗、resume 选择器等）原样可用。断线重连自动回放屏幕。 |
 
 > 前置要求：Node.js ≥ 18，本机已安装 Codex CLI（`npm install -g @openai/codex`）。Codex 未登录也能启动——可直接在手机上完成 ChatGPT 账号登录（见下）。
 
@@ -104,7 +104,7 @@ Node 网关 (server/index.js + server/gateway.js, 端口 7860)
 - **审批**：Codex 请求运行命令/写文件时，页面底部弹出卡片，可选 允许 / 本会话均允许 / 拒绝，带震动提醒。
 - **中断回合**：回合进行中发送按钮变为红色停止键。
 - **查看本回合改动**：右上角分支图标，弹出统一 diff。
-- **终端**：底部「终端」页 → 启动 Codex TUI / PowerShell；右上 ✕ 结束会话。
+- **终端**：底部「终端」页 → 启动 Codex TUI / 系统 Shell（按钮会显示服务端真实 Shell 名）；工具栏 −/＋ 调节字号；右上 ✕ 结束会话。
 - **设备管理**：「状态」页 → 设备与权限：查看、改名、撤销设备；分享接入创建邀请。
 - **登录/切换 Codex 账号**：「状态」页 →「登录 / 切换账号」→「ChatGPT 账号登录」，走与 `codex login` 相同的官方 OAuth 授权：
   - **人在电脑旁（推荐）**：点「在电脑上打开授权页」，授权页在电脑默认浏览器弹出，登录后手机端自动确认。

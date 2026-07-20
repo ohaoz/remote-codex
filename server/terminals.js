@@ -10,6 +10,18 @@ function encodeTerminalControl(message) {
   return `\u0000${JSON.stringify(message)}`;
 }
 
+/**
+ * Human-readable name of the shell a `kind: 'shell'` terminal will run.
+ * The web UI uses it so the "open shell" button never promises PowerShell
+ * on a machine that will actually start bash/zsh.
+ */
+function defaultShellLabel(platform = process.platform, env = process.env) {
+  if (platform === 'win32') return 'PowerShell';
+  const shell = String(env.SHELL || '/bin/bash');
+  const base = shell.split('/').pop();
+  return base || 'shell';
+}
+
 function terminalSyncFrames(snapshot) {
   const frames = [
     encodeTerminalControl({
@@ -52,17 +64,18 @@ class TerminalManager extends EventEmitter {
       const exe = findCodexExe();
       const args = [];
       if (opts.resumeId) args.push('resume', opts.resumeId);
-      if (exe) return { file: exe, args };
+      if (exe) return { file: exe, args, label: 'Codex TUI' };
       // Fall back to the npm shim through the default shell
       if (process.platform === 'win32') {
-        return { file: 'cmd.exe', args: ['/d', '/s', '/c', 'codex', ...args] };
+        return { file: 'cmd.exe', args: ['/d', '/s', '/c', 'codex', ...args], label: 'Codex TUI' };
       }
-      return { file: '/bin/sh', args: ['-lc', ['codex', ...args].join(' ')] };
+      return { file: '/bin/sh', args: ['-lc', ['codex', ...args].join(' ')], label: 'Codex TUI' };
     }
+    const label = defaultShellLabel();
     if (process.platform === 'win32') {
-      return { file: 'powershell.exe', args: ['-NoLogo'] };
+      return { file: 'powershell.exe', args: ['-NoLogo'], label };
     }
-    return { file: process.env.SHELL || '/bin/bash', args: ['-l'] };
+    return { file: process.env.SHELL || '/bin/bash', args: ['-l'], label };
   }
 
   create(kind = 'codex', opts = {}) {
@@ -82,7 +95,7 @@ class TerminalManager extends EventEmitter {
       id,
       kind,
       cwd,
-      title: kind === 'codex' ? 'Codex TUI' : 'Shell',
+      title: spec.label || (kind === 'codex' ? 'Codex TUI' : 'Shell'),
       proc,
       buffer: '',
       generation: this.nextGeneration++,
@@ -186,6 +199,7 @@ class TerminalManager extends EventEmitter {
 
 module.exports = {
   TerminalManager,
+  defaultShellLabel,
   encodeTerminalControl,
   terminalSyncFrames,
 };

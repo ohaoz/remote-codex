@@ -10,7 +10,7 @@
 <title>codex://remote</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="stylesheet" href="/vendor/xterm.css">
 <link rel="stylesheet" href="/app.css">
 <link rel="stylesheet" href="/session-controls.css">
@@ -24,15 +24,44 @@
       <svg class="spark login-spark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v20M2 12h20M5.8 5.8l12.4 12.4M18.2 5.8L5.8 18.2" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" fill="none"/></svg>
       <div class="mark-eyebrow">REMOTE COCKPIT · 手机驾驶舱</div>
       <h1 class="wordmark">codex<span class="wm-sep">://</span>remote<span class="cursor-block"></span></h1>
-      <p class="login-sub">连接这台电脑上的 Codex CLI。在电脑启动窗口扫码，或输入一次性配对码。</p>
+      <p class="login-sub">把这台手机变成电脑上 Codex CLI 的遥控器。首次连接按下面三步操作。</p>
     </div>
-    <form id="pair-form" class="pair-form" autocomplete="off">
-      <label class="field-label" for="pair-token">一次性配对码</label>
-      <input id="pair-token" class="pair-input" type="password" placeholder="粘贴电脑端显示的迁移码或邀请"
-             autocapitalize="off" autocorrect="off" spellcheck="false">
-      <button class="btn-primary" type="submit">建立连接</button>
-      <p id="pair-error" class="pair-error" hidden></p>
-    </form>
+
+    <ol class="pair-steps" aria-label="配对步骤">
+      <li class="pair-step">
+        <span class="ps-num" aria-hidden="true">1</span>
+        <span class="ps-body">
+          <b>在电脑上启动</b>
+          <span>打开电脑终端，运行 <code>codex-remote</code>，屏幕上会出现一个二维码。</span>
+        </span>
+      </li>
+      <li class="pair-step">
+        <span class="ps-num" aria-hidden="true">2</span>
+        <span class="ps-body">
+          <b>用手机扫码</b>
+          <span>用相机或浏览器扫描那个二维码，会自动打开本页并完成配对，无需输入任何东西。</span>
+        </span>
+      </li>
+      <li class="pair-step">
+        <span class="ps-num" aria-hidden="true">3</span>
+        <span class="ps-body">
+          <b>给更多手机授权</b>
+          <span>已配对的手机在「状态 → 分享接入」里创建邀请，新手机扫新码即可加入。</span>
+        </span>
+      </li>
+    </ol>
+
+    <details id="pair-manual" class="pair-manual">
+      <summary>扫不了码？手动输入配对码</summary>
+      <form id="pair-form" class="pair-form" autocomplete="off">
+        <label class="field-label" for="pair-token">配对码 · 显示在电脑终端二维码下方</label>
+        <input id="pair-token" class="pair-input" type="password" placeholder="粘贴一次性配对码或邀请码"
+               autocapitalize="off" autocorrect="off" spellcheck="false">
+        <button class="btn-primary" type="submit">建立连接</button>
+      </form>
+    </details>
+    <p id="pair-error" class="pair-error" role="alert" hidden></p>
+
     <footer class="login-foot">同一局域网内使用 · 配对码一次有效 · 设备可单独撤销</footer>
   </div>
 </section>
@@ -74,10 +103,16 @@
     </div>
 
     <!-- 审批停靠区 -->
-    <div id="approval-dock" class="approval-dock"></div>
+    <div id="approval-dock" class="approval-dock">
+      <div id="approval-dock-head" class="approval-dock-head" hidden></div>
+    </div>
 
     <!-- 输入区 -->
     <div class="composer">
+      <div id="composer-lock" class="composer-lock" hidden aria-live="polite">
+        <span class="spin" aria-hidden="true"></span>
+        <span id="composer-lock-text">连接同步中，稍等片刻…</span>
+      </div>
       <div class="execution-context" id="execution-context" aria-live="polite">
         <span class="exec-session" id="exec-session">新会话</span>
         <span class="exec-sep">·</span>
@@ -89,24 +124,19 @@
           <span id="context-ring" class="context-ring" aria-hidden="true" hidden><b id="context-ring-value"></b></span>
         </button>
         <button id="btn-model-switch" class="model-switch" type="button" aria-label="切换模型与推理强度" aria-live="polite">
-          <span class="model-switch-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M12 2v20M2 12h20M5.8 5.8l12.4 12.4M18.2 5.8L5.8 18.2" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" fill="none"/></svg>
-          </span>
-          <span class="model-switch-copy">
-            <span class="model-switch-label" id="model-switch-label">当前模型</span>
-            <span class="model-switch-name" id="model-current">默认模型</span>
-          </span>
+          <svg class="model-switch-spark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v20M2 12h20M5.8 5.8l12.4 12.4M18.2 5.8L5.8 18.2" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" fill="none"/></svg>
+          <span class="model-switch-name" id="model-current">默认模型</span>
           <span class="model-switch-effort" id="effort-current">默认推理</span>
+          <span class="model-switch-pending" id="model-switch-pending" hidden>下回合</span>
           <svg class="model-switch-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 10l4 4 4-4"/></svg>
         </button>
         <button id="btn-command-help" class="session-control-icon" type="button" aria-label="查看可用斜杠命令">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5L5 12l4 7M15 5l4 7-4 7"/></svg>
         </button>
-      </div>
-      <div class="chip-row" id="chip-row">
-        <button class="chip" id="chip-cwd">目录</button>
-        <button class="chip" id="chip-approval">审批</button>
-        <button class="chip" id="chip-sandbox">沙箱</button>
+        <span class="controls-sep" aria-hidden="true"></span>
+        <button class="chip" id="chip-cwd" type="button">目录</button>
+        <button class="chip" id="chip-approval" type="button">审批</button>
+        <button class="chip" id="chip-sandbox" type="button">沙箱</button>
       </div>
       <div id="command-suggest" class="command-suggest" role="listbox" aria-label="斜杠命令建议" hidden></div>
       <div class="composer-bar">
@@ -129,8 +159,14 @@
       </div>
       <div id="term-list" class="term-list"></div>
       <div class="term-actions">
-        <button id="btn-new-codex-tui" class="btn-primary">▶ 启动 Codex TUI</button>
-        <button id="btn-new-shell" class="btn-ghost">$ 打开 PowerShell</button>
+        <button id="btn-new-codex-tui" class="btn-primary">
+          <svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5l12 7-12 7z"/></svg>
+          <span>启动 Codex TUI</span>
+        </button>
+        <button id="btn-new-shell" class="btn-ghost">
+          <svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7l5 5-5 5M12 17h7"/></svg>
+          <span id="new-shell-label">打开系统终端</span>
+        </button>
       </div>
     </div>
     <div id="term-view" class="term-view" hidden>
@@ -142,21 +178,31 @@
           <span id="term-title" class="term-title mono">Codex TUI</span>
           <span id="term-connection-status" class="term-connection-status mono" data-state="idle">未连接</span>
         </span>
+        <button id="btn-term-font-dec" class="icon-btn" aria-label="减小终端字号">
+          <svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg>
+        </button>
+        <button id="btn-term-font-inc" class="icon-btn" aria-label="增大终端字号">
+          <svg viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></svg>
+        </button>
         <button id="btn-term-kill" class="icon-btn danger" aria-label="结束会话">
           <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </div>
       <div id="xterm-holder" class="xterm-holder"></div>
+      <div id="keybar-hint" class="keybar-hint" hidden>
+        <span>小键盘提示：<b>Ctrl</b> 是锁存键——先点一下点亮，再按任意字母即发送 Ctrl+字母；其余按键点一下立即发送。</span>
+        <button id="keybar-hint-close" type="button">知道了</button>
+      </div>
       <div class="keybar" id="keybar">
-        <button data-seq="&#27;">Esc</button>
-        <button data-seq="&#9;">Tab</button>
-        <button data-ctrl="1" id="key-ctrl">Ctrl</button>
-        <button data-seq="&#27;[A">↑</button>
-        <button data-seq="&#27;[B">↓</button>
-        <button data-seq="&#27;[D">←</button>
-        <button data-seq="&#27;[C">→</button>
-        <button data-seq="&#3;">^C</button>
-        <button data-seq="&#13;">⏎</button>
+        <button data-seq="&#27;" aria-label="Esc 键">Esc</button>
+        <button data-seq="&#9;" aria-label="Tab 键">Tab</button>
+        <button data-ctrl="1" id="key-ctrl" aria-label="Ctrl 锁存键：点亮后再按字母发送组合键" aria-pressed="false">Ctrl</button>
+        <button data-seq="&#27;[A" aria-label="上方向键">↑</button>
+        <button data-seq="&#27;[B" aria-label="下方向键">↓</button>
+        <button data-seq="&#27;[D" aria-label="左方向键">←</button>
+        <button data-seq="&#27;[C" aria-label="右方向键">→</button>
+        <button data-seq="&#3;" aria-label="发送 Ctrl+C 中断">^C</button>
+        <button data-seq="&#13;" aria-label="回车键">⏎</button>
       </div>
     </div>
   </main>
@@ -196,24 +242,27 @@
 
   <!-- ============ 会话抽屉 ============ -->
   <div id="drawer-mask" class="drawer-mask" hidden></div>
-  <aside id="drawer" class="drawer">
+  <aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-label="历史会话">
     <div class="drawer-head">
       <span class="wordmark xs">codex<span class="wm-sep">://</span>remote</span>
     </div>
-    <button id="btn-new-thread" class="btn-primary drawer-new">＋ 新建会话</button>
+    <button id="btn-new-thread" class="btn-primary drawer-new">
+      <svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      <span>新建会话</span>
+    </button>
     <div class="drawer-label mark-eyebrow">SESSIONS · 历史会话</div>
     <div id="thread-list" class="thread-list"><div class="thread-loading">载入中…</div></div>
   </aside>
 
   <!-- ============ 通用底部弹层 ============ -->
   <div id="sheet-mask" class="sheet-mask" hidden></div>
-  <div id="sheet" class="sheet" hidden>
+  <div id="sheet" class="sheet" role="dialog" aria-modal="true" hidden>
     <div class="sheet-grip"></div>
     <div id="sheet-title" class="sheet-title"></div>
     <div id="sheet-body" class="sheet-body"></div>
   </div>
 
-  <div id="toast" class="toast" hidden></div>
+  <div id="toast" class="toast" role="status" hidden></div>
 </section>
 
 <script src="/vendor/marked.js"></script>

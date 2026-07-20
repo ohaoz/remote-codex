@@ -13,12 +13,28 @@ function el(tag, cls, html) {
   return n;
 }
 
-function toast(msg, ms = 2600) {
+/**
+ * Transient feedback. Pass `{ sticky: true }` for important errors: the toast
+ * then stays until the user dismisses it instead of vanishing after 2.6s.
+ */
+function toast(msg, opts = 2600) {
+  const options = typeof opts === 'number' ? { ms: opts } : (opts || {});
   const t = $('#toast');
-  t.textContent = msg;
-  t.hidden = false;
   clearTimeout(toast._timer);
-  toast._timer = setTimeout(() => { t.hidden = true; }, ms);
+  t.innerHTML = '';
+  t.classList.toggle('sticky', !!options.sticky);
+  const text = el('span', 'toast-text');
+  text.textContent = msg;
+  t.appendChild(text);
+  if (options.sticky) {
+    const close = el('button', 'toast-close', '关闭');
+    close.type = 'button';
+    close.addEventListener('click', () => { t.hidden = true; });
+    t.appendChild(close);
+  } else {
+    toast._timer = setTimeout(() => { t.hidden = true; }, options.ms || 2600);
+  }
+  t.hidden = false;
 }
 
 function relTime(unixSec) {
@@ -558,14 +574,21 @@ async function boot() {
       enterApp(paired.device);
       return;
     } catch (error) {
-      const target = $('#pair-error');
-      target.textContent = error.status === 429
-        ? `尝试次数过多，请 ${error.retryAfter || '稍后'} 再试。`
-        : '配对码无效、已使用或已过期。';
-      target.hidden = false;
+      showPairError(error);
     }
   }
   $('#view-login').hidden = false;
+}
+
+function showPairError(error) {
+  const target = $('#pair-error');
+  target.textContent = error.status === 429
+    ? `尝试次数过多，请 ${error.retryAfter || '稍后'} 再试。`
+    : '配对码无效、已使用或已过期。请回到电脑终端重新运行 codex-remote 获取新码，或让 Owner 手机重新创建邀请。';
+  target.hidden = false;
+  // Surface the manual fallback so the user can retype the code.
+  const manual = $('#pair-manual');
+  if (manual) manual.open = true;
 }
 
 $('#pair-form').addEventListener('submit', async (e) => {
@@ -579,10 +602,7 @@ $('#pair-form').addEventListener('submit', async (e) => {
     store.clearLegacyToken();
     enterApp(paired.device);
   } catch (error) {
-    err.textContent = error.status === 429
-      ? `尝试次数过多，请 ${error.retryAfter || '稍后'} 再试。`
-      : '配对码无效、已使用或已过期。';
-    err.hidden = false;
+    showPairError(error);
   }
 });
 
@@ -646,6 +666,16 @@ const drawer = { open() {
 } };
 $('#btn-drawer').addEventListener('click', () => drawer.open());
 $('#drawer-mask').addEventListener('click', () => drawer.close());
+
+/* Keyboard escape hatch: the PWA also runs on desktop, where mask-tap-only
+   dismissal is not discoverable. */
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const sheetEl = $('#sheet');
+  if (sheetEl && !sheetEl.hidden) { sheet.close(); return; }
+  const drawerEl = $('#drawer');
+  if (drawerEl && drawerEl.classList.contains('show')) drawer.close();
+});
 
 /* ============================== threads ============================== */
 async function loadThreads() {
@@ -732,7 +762,7 @@ async function resumeThread(threadId) {
       },
     });
   } catch (e) {
-    toast('恢复会话失败：' + e.message);
+    toast('恢复会话失败：' + e.message, { sticky: true });
   } finally {
     tail.remove();
   }
@@ -1164,7 +1194,7 @@ function markLocalSendStarted(operation) {
   entry.bubble.classList.add('sending');
   entry.bubble.classList.remove('failed', 'unknown', 'unresolved');
   entry.statusNode.hidden = false;
-  entry.statusNode.textContent = '回合已启动 · 已确认送达';
+  entry.statusNode.textContent = '已送达 · Codex 正在处理';
   entry.actions.hidden = true;
   entry.retryButton.hidden = true;
 }
@@ -1227,7 +1257,7 @@ function markLocalSendFailed(operation, error) {
   entry.bubble.classList.remove('sending', 'unknown');
   entry.bubble.classList.add('failed');
   entry.statusNode.hidden = false;
-  entry.statusNode.textContent = `发送失败 · 未自动重试：${error.message}`;
+  entry.statusNode.textContent = `消息没有发出去（${error.message}）。内容已保留，可点「重试」。`;
   entry.actions.hidden = false;
   entry.retryButton.hidden = false;
   entry.restoreButton.hidden = false;
@@ -1245,7 +1275,7 @@ function markLocalSendUnresolved(operation, reason) {
   entry.bubble.classList.remove('sending', 'unknown');
   entry.bubble.classList.add('unresolved');
   entry.statusNode.hidden = false;
-  entry.statusNode.textContent = `结果未知 · ${reason}；未开放盲目重试`;
+  entry.statusNode.textContent = `结果未知 · ${reason}。为避免发重复消息，请先看一眼回复是否出现，再决定要不要重发。`;
   entry.actions.hidden = false;
   entry.retryButton.hidden = true;
   entry.restoreButton.hidden = false;
@@ -1261,8 +1291,8 @@ function markLocalSendUnknown(operation) {
   entry.bubble.classList.add('unknown');
   entry.statusNode.hidden = false;
   entry.statusNode.textContent = operation.phase === 'starting-thread'
-    ? '会话创建结果未知 · 正在对账'
-    : '结果未知 · 待对账后才能重试';
+    ? '正在确认新会话是否创建成功…'
+    : '网络有点波动，正在确认这条消息是否送达…';
   entry.actions.hidden = true;
   refreshMutationLocks();
   beginUnknownSendReconciliation(operation);
@@ -1346,7 +1376,7 @@ function reconcileLocalSendsWithCanonicalThread(thread, { final = true } = {}) {
       && operation.status === 'unknown'
     ) {
       resolved = true;
-      markLocalSendUnresolved(operation, 'canonical 未发现对应回合');
+      markLocalSendUnresolved(operation, '会话记录里没有找到这条消息');
     }
   }
   return resolved;
@@ -1379,7 +1409,7 @@ function beginUnknownSendReconciliation(operation) {
   ) {
     markLocalSendUnresolved(
       operation,
-      '服务端未回显可关联 nonce，未认领任何新会话',
+      '没能确认新会话是否创建成功',
     );
     return;
   }
@@ -1450,7 +1480,7 @@ async function pollUnknownTurn(operation) {
       if (operation.deliveryProven) {
         operation.reconcileRunning = false;
       } else {
-        markLocalSendUnresolved(operation, '无法读取 canonical 会话状态');
+        markLocalSendUnresolved(operation, '暂时联系不上电脑端核对记录');
       }
       return;
     }
@@ -1459,7 +1489,7 @@ async function pollUnknownTurn(operation) {
     if (operation.deliveryProven) {
       operation.reconcileRunning = false;
     } else if (operation.status === 'unknown') {
-      markLocalSendUnresolved(operation, 'canonical 会话状态无有效结果');
+      markLocalSendUnresolved(operation, '多次核对后仍没找到这条消息');
     }
     return;
   }
@@ -1537,13 +1567,13 @@ async function dispatchUserMessage(text, existingEntry = null) {
     if (operation.deliveryProven) {
       finishSendOperation(operation, { retain: true });
       beginUnknownSendReconciliation(operation);
-      toast('回合已启动，RPC 结果矛盾，正在对账', 4000);
+      toast('消息已送达，正在核对回合状态…', 4000);
     } else if (uncertainThreadCreation || uncertainTurnStart) {
       if (transitionSendOperation(operation, 'unknown')) markLocalSendUnknown(operation);
-      toast('发送结果未知，正在等待重连对账', 4000);
+      toast('没连稳，正在确认消息是否发出去…', 4000);
     } else if (transitionSendOperation(operation, 'failed')) {
       markLocalSendFailed(operation, e);
-      toast('发送失败：' + e.message);
+      toast('消息没有发出去，点消息下方「重试」重发', { sticky: true });
     }
   }
 }
@@ -1588,11 +1618,31 @@ function mutationsLocked() {
     || hasUnsettledSendOperation();
 }
 
+/** Human explanation for why input is disabled right now (shown above it). */
+function mutationLockReason() {
+  const status = eventSync.snapshot().status;
+  if (!state.wsAlive || status === 'reconnecting') return '正在连接电脑（自动重试中）…';
+  if (status !== 'synced') return '正在与电脑同步会话…';
+  if (state.bridge === 'starting') return 'Codex 引擎启动中…';
+  if (state.bridge !== 'ready') return 'Codex 引擎离线，等待电脑端恢复';
+  if (state.threadSwitching) return '正在切换会话…';
+  if (hasUnsettledSendOperation()) return '正在确认上一条消息是否送达…';
+  return '';
+}
+
 function refreshMutationLocks() {
   const locked = mutationsLocked();
   if (typeof input !== 'undefined' && input) {
     input.disabled = locked;
     input.setAttribute('aria-busy', locked ? 'true' : 'false');
+    input.setAttribute('placeholder', locked ? '暂不能发送，见上方状态' : '给 Codex 下指令…');
+  }
+  const lockNote = $('#composer-lock');
+  if (lockNote) {
+    const reason = locked ? mutationLockReason() : '';
+    lockNote.hidden = !reason;
+    const lockText = $('#composer-lock-text');
+    if (lockText) lockText.textContent = reason;
   }
   const newThreadButton = $('#btn-new-thread');
   if (newThreadButton) newThreadButton.disabled = locked;
@@ -1655,7 +1705,7 @@ function handleCodexEvent(method, params, replay = false) {
       state.rateLimits = null;
       renderChips();
     } else {
-      toast('登录失败：' + (params.error || '未知原因'), 4000);
+      toast('登录失败：' + (params.error || '未知原因'), { sticky: true });
     }
     refreshStatusPage().catch(() => {});
     return;
@@ -1890,6 +1940,27 @@ const ICONS = {
   tool: '<svg class="act-ico" viewBox="0 0 24 24"><path d="M14 7l3 3m-9 9l-4 1 1-4L15 6a2 2 0 0 1 3 3L8 19z"/></svg>',
   search: '<svg class="act-ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>',
   chevron: '<svg class="act-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>',
+  stateOk: '<svg class="act-state-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l5 5L20 7"/></svg>',
+  stateFail: '<svg class="act-state-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+};
+
+/* Line icons shared by chips / rows / buttons — replaces the old mixed
+   ▤ ✓ ⛨ ▸ ↻ ⌬ glyph characters that rendered inconsistently across phones. */
+const UI_ICONS = {
+  folder: '<svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+  check: '<svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l5 5L20 7"/></svg>',
+  shield: '<svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 7.6-8 9-4.6-1.4-8-4.5-8-9V6z"/></svg>',
+  spark: '<svg class="kicker-spark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M3 12h18M6.3 6.3l11.4 11.4M17.7 6.3L6.3 17.7"/></svg>',
+  refresh: '<svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 5v6h-6M4 19v-6h6M19.5 11a8 8 0 0 0-14-4M4.5 13a8 8 0 0 0 14 4"/></svg>',
+  model: '<svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v20M2 12h20M5.8 5.8l12.4 12.4M18.2 5.8L5.8 18.2"/></svg>',
+  devices: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="12" height="14" rx="2"/><path d="M18 8h1a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6M9 16h.01"/></svg>',
+  share: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 14h3v3h-3zM20 17v4h-4"/></svg>',
+  chevronRight: '<svg class="nr-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
+  dirEnter: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>',
+  dirUp: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14l-4-4 4-4M5 10h9a5 5 0 0 1 5 5v4"/></svg>',
+  optCheck: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l5 5L20 7"/></svg>',
+  termCodex: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l6 6-6 6M14 18h5"/></svg>',
+  termShell: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7l5 5-5 5M12 17h7"/></svg>',
 };
 
 function makeAct(icon, label, stateText) {
@@ -1909,7 +1980,11 @@ function makeAct(icon, label, stateText) {
 function setActState(box, cls, text) {
   box.classList.remove('running', 'ok', 'fail');
   box.classList.add(cls);
-  $('.act-state', box).textContent = text;
+  const stateEl = $('.act-state', box);
+  if (!stateEl) return;
+  // A glyph next to the text keeps success/failure readable without color.
+  const icon = cls === 'ok' ? ICONS.stateOk : cls === 'fail' ? ICONS.stateFail : '';
+  stateEl.innerHTML = icon + esc(text);
 }
 
 function renderCmdItem(item, completed) {
@@ -2104,6 +2179,13 @@ function renderApprovalBadge() {
   const b = $('#tab-chat-badge');
   b.hidden = !n;
   b.textContent = n;
+  // With several stacked requests the dock scrolls inside 32vh; a sticky
+  // count header tells the user there is more below the fold.
+  const head = $('#approval-dock-head');
+  if (head) {
+    head.hidden = n < 2;
+    if (n >= 2) head.textContent = `待处理审批 ${n} 条 · 上下滑动查看`;
+  }
 }
 
 function decide(rpcId, result) {
@@ -2213,7 +2295,7 @@ function buildApprovalCard(entry) {
       .map((button) => `<button class="appr-btn ${button.cls}" data-d="${button.d}">${button.label}</button>`)
       .join('');
     card.innerHTML = `
-      <div class="approval-kicker">approval · 命令执行请求</div>
+      <div class="approval-kicker">${UI_ICONS.spark}approval · 命令执行请求</div>
       <div class="approval-title">Codex 请求运行命令</div>
       <pre class="approval-cmd">${esc(cmd)}</pre>
       ${params.reason ? `<div class="approval-reason">${esc(params.reason)}</div>` : ''}
@@ -2233,7 +2315,7 @@ function buildApprovalCard(entry) {
       ? Object.keys(params.fileChanges || {})
       : (Array.isArray(entry.context?.files) ? entry.context.files : []);
     card.innerHTML = `
-      <div class="approval-kicker">approval · 文件修改请求</div>
+      <div class="approval-kicker">${UI_ICONS.spark}approval · 文件修改请求</div>
       <div class="approval-title">Codex 请求写入文件</div>
       ${files.length ? `<pre class="approval-cmd">${esc(files.join('\n'))}</pre>` : ''}
       ${params.reason ? `<div class="approval-reason">${esc(params.reason)}</div>` : ''}
@@ -2264,7 +2346,7 @@ function buildApprovalCard(entry) {
         ${(!q.options || q.isOther) ? `<input class="appr-input" data-q="${i}" type="${q.isSecret ? 'password' : 'text'}" placeholder="输入回答…">` : ''}`;
     }).join('<hr style="border:none;border-top:1px solid var(--line-soft);margin:10px 0">');
     card.innerHTML = `
-      <div class="approval-kicker">input · Codex 在等待你的回答</div>
+      <div class="approval-kicker">${UI_ICONS.spark}input · Codex 在等待你的回答</div>
       ${blocks}
       <div class="approval-actions"><button class="appr-btn yes" data-d="submit">提交回答</button></div>`;
     $('[data-d="submit"]', card).addEventListener('click', () => {
@@ -2282,7 +2364,7 @@ function buildApprovalCard(entry) {
 
   if (method === 'item/permissions/requestApproval') {
     card.innerHTML = `
-      <div class="approval-kicker">approval · 权限提升请求</div>
+      <div class="approval-kicker">${UI_ICONS.spark}approval · 权限提升请求</div>
       <div class="approval-title">Codex 请求额外权限</div>
       ${params.reason ? `<div class="approval-reason">${esc(params.reason)}</div>` : ''}
       <pre class="approval-cmd">${esc(JSON.stringify(params.permissions, null, 2))}</pre>
@@ -2302,7 +2384,7 @@ function buildApprovalCard(entry) {
 
   if (method === 'mcpServer/elicitation/request') {
     card.innerHTML = `
-      <div class="approval-kicker">mcp · ${esc(params.serverName || '')} 请求确认</div>
+      <div class="approval-kicker">${UI_ICONS.spark}mcp · ${esc(params.serverName || '')} 请求确认</div>
       <div class="approval-title">${esc(params.message || '')}</div>
       ${params.mode === 'url' ? `<div class="approval-reason mono">${esc(params.url)}</div>` : ''}
       <div class="approval-actions">
@@ -2318,7 +2400,7 @@ function buildApprovalCard(entry) {
   }
 
   card.innerHTML = `
-    <div class="approval-kicker">approval · ${esc(method)}</div>
+    <div class="approval-kicker">${UI_ICONS.spark}approval · ${esc(method)}</div>
     <pre class="approval-cmd">${esc(JSON.stringify(params, null, 2).slice(0, 1500))}</pre>
     <div class="approval-actions">
       <button class="appr-btn no" data-d="cancel">取消请求</button>
@@ -2328,15 +2410,23 @@ function buildApprovalCard(entry) {
 }
 
 /* ============================== chips & sheets ============================== */
+function setChip(id, icon, label) {
+  const chip = $(id);
+  chip.innerHTML = icon;
+  const text = el('span', 'chip-label');
+  text.textContent = label;
+  chip.appendChild(text);
+}
+
 function renderChips() {
   const p = state.prefs;
-  $('#chip-cwd').textContent = `▤ ${p.cwd ? baseName(p.cwd) : '默认目录'}`;
+  setChip('#chip-cwd', UI_ICONS.folder, p.cwd ? baseName(p.cwd) : '默认目录');
   $('#chip-cwd').classList.toggle('set', !!p.cwd);
   const approvalLabel = { untrusted: '谨慎审批', 'on-request': '按需审批', never: '免审批' }[p.approval] || '审批';
-  $('#chip-approval').textContent = `✓ ${approvalLabel}`;
+  setChip('#chip-approval', UI_ICONS.check, approvalLabel);
   $('#chip-approval').classList.toggle('set', p.approval !== 'on-request');
   const sboxLabel = { 'read-only': '只读', 'workspace-write': '工作区可写', 'danger-full-access': '完全访问' }[p.sandbox] || p.sandbox;
-  $('#chip-sandbox').textContent = `⛨ ${sboxLabel}`;
+  setChip('#chip-sandbox', UI_ICONS.shield, sboxLabel);
   $('#chip-sandbox').classList.toggle('set', p.sandbox !== 'workspace-write');
   renderExecutionContext();
   renderModelBar();
@@ -2370,8 +2460,13 @@ function renderModelBar() {
   });
   $('#model-current').textContent = selection.displayName;
   $('#effort-current').textContent = selection.selectedEffort || '默认推理';
-  $('#model-switch-label').textContent = selection.pending ? '下回合将使用' : '当前模型';
+  const pendingTag = $('#model-switch-pending');
+  if (pendingTag) pendingTag.hidden = !selection.pending;
   button.classList.toggle('pending', selection.pending);
+  button.setAttribute(
+    'aria-label',
+    selection.pending ? '切换模型与推理强度（已选的模型将在下一回合生效）' : '切换模型与推理强度',
+  );
   button.setAttribute('aria-busy', state.modelsLoading ? 'true' : 'false');
   renderContextRing();
 }
@@ -2405,7 +2500,7 @@ function renderContextRing() {
 
 function optRow(title, sub, selected) {
   const b = el('button', 'opt-row' + (selected ? ' selected' : ''));
-  b.innerHTML = `<span class="o-main"><span class="o-title">${esc(title)}</span>${sub ? `<span class="o-sub">${esc(sub)}</span>` : ''}</span><span class="o-check">✓</span>`;
+  b.innerHTML = `<span class="o-main"><span class="o-title">${esc(title)}</span>${sub ? `<span class="o-sub">${esc(sub)}</span>` : ''}</span><span class="o-check">${UI_ICONS.optCheck}</span>`;
   return b;
 }
 
@@ -2581,8 +2676,8 @@ function renderSessionDetail(root) {
       <div class="session-quota-note">额度属于当前登录账户，随所有会话共享；输入 /status 或点左下状态钮可随时刷新。</div>
     </div>
     <div class="session-panel-actions">
-      <button class="btn-ghost" data-session-refresh>↻ 刷新状态</button>
-      <button class="btn-ghost" data-session-model>⌬ 切换模型</button>
+      <button class="btn-ghost" data-session-refresh>${UI_ICONS.refresh}<span>刷新状态</span></button>
+      <button class="btn-ghost" data-session-model>${UI_ICONS.model}<span>切换模型</span></button>
     </div>`;
   $('[data-session-refresh]', root).addEventListener('click', () => openSessionStatus({ refresh: true }));
   $('[data-session-model]', root).addEventListener('click', () => openModelPicker());
@@ -2736,7 +2831,7 @@ async function startReview(target, label) {
   if (state.activeTurnId) { toast('回合进行中，请稍候'); return; }
   try {
     $('#chat-empty').hidden = true;
-    appendChat(el('div', 'turn-status', `⌁ 代码审查 · ${esc(label).slice(0, 80)}`));
+    appendChat(el('div', 'turn-status', `代码审查 · ${esc(label).slice(0, 80)}`));
     scrollBottom(true);
     setTurnActive('pending');
     await rpc('review/start', {
@@ -2909,7 +3004,7 @@ async function openDirBrowser(startPath) {
   sheet.open('选择工作目录', (body) => {
     const bar = el('div', 'dir-bar');
     const pathEl = el('div', 'dir-path mono');
-    const pick = el('button', 'btn-primary', '✓ 就用这个目录');
+    const pick = el('button', 'btn-primary', `${UI_ICONS.check}<span>就用这个目录</span>`);
     pick.style.width = '100%';
     const quick = el('div', 'dir-quick');
     const listEl = el('div', 'dir-list');
@@ -2918,7 +3013,7 @@ async function openDirBrowser(startPath) {
     const drives = state.serverInfo?.server?.drives || [];
     const home = state.serverInfo?.server?.home;
     const quicks = [];
-    if (home) quicks.push({ label: '⌂ 主目录', path: home });
+    if (home) quicks.push({ label: '主目录', path: home });
     for (const d of drives) quicks.push({ label: d.replace(/\\$/, ''), path: d });
     quicks.push({ label: '默认', path: '' });
     for (const q of quicks) {
@@ -2952,14 +3047,14 @@ async function openDirBrowser(startPath) {
         listEl.innerHTML = '';
         const up = parentPath(current);
         if (up) {
-          const row = el('button', 'dir-item up', '<span class="d-ico">↩</span><span>上一级</span>');
+          const row = el('button', 'dir-item up', `<span class="d-ico">${UI_ICONS.dirUp}</span><span>上一级</span>`);
           row.addEventListener('click', () => nav(up));
           listEl.appendChild(row);
         }
         if (!dirs.length) listEl.appendChild(el('div', 'thread-loading', '（没有子文件夹）'));
         for (const d of dirs) {
           const row = el('button', 'dir-item');
-          row.innerHTML = `<span class="d-ico">▸</span><span class="d-name"></span>`;
+          row.innerHTML = `<span class="d-ico">${UI_ICONS.dirEnter}</span><span class="d-name"></span>`;
           $('.d-name', row).textContent = d.fileName;
           row.addEventListener('click', () => nav(joinPath(current, d.fileName)));
           listEl.appendChild(row);
@@ -3013,7 +3108,7 @@ function renderTermList() {
   for (const t of state.term.list) {
     const item = el('button', 'term-item');
     item.innerHTML = `
-      <span class="ti-glyph">${t.kind === 'codex' ? '❯' : '$'}</span>
+      <span class="ti-glyph">${t.kind === 'codex' ? UI_ICONS.termCodex : UI_ICONS.termShell}</span>
       <span class="ti-main">
         <span class="ti-title">${esc(t.title)} #${t.id}</span>
         <span class="ti-sub">${esc(t.cwd)}</span>
@@ -3033,24 +3128,47 @@ $('#btn-new-shell').addEventListener('click', async () => {
   catch (e) { toast(e.message); }
 });
 
+const TERM_FONT_MIN = 10;
+const TERM_FONT_MAX = 20;
+
+function termFontSize() {
+  const stored = Number(state.prefs.termFontSize);
+  if (Number.isFinite(stored) && stored >= TERM_FONT_MIN && stored <= TERM_FONT_MAX) return stored;
+  return 13;
+}
+
+function setTermFontSize(size) {
+  const next = Math.min(TERM_FONT_MAX, Math.max(TERM_FONT_MIN, size));
+  state.prefs.termFontSize = next;
+  savePrefs();
+  if (state.term.xterm) {
+    state.term.xterm.options.fontSize = next;
+    fitTerm();
+  }
+  toast(`终端字号 ${next}px`, 1200);
+}
+
 function openTerminal(t) {
   state.term.current = t.id;
   state.term.baseTitle = `${t.title} #${t.id} · ${baseName(t.cwd)}`;
   $('#term-home').hidden = true;
   $('#term-view').hidden = false;
   $('#term-title').textContent = state.term.baseTitle;
+  renderKeybarHint();
 
   if (!state.term.xterm) {
     const xt = new Terminal({
       fontFamily: '"Cascadia Code", Menlo, monospace',
-      fontSize: 12.5,
+      fontSize: termFontSize(),
       lineHeight: 1.25,
       cursorBlink: true,
       allowProposedApi: true,
       theme: {
+        // The window well is always dark, so this mirrors the dark-theme
+        // brand accent (--accent dark = #CC6B4A) instead of a third hue.
         background: '#1F1E1B', foreground: '#DCD8CC',
-        cursor: '#D97757', cursorAccent: '#1F1E1B',
-        selectionBackground: 'rgba(217,119,87,0.30)',
+        cursor: '#CC6B4A', cursorAccent: '#1F1E1B',
+        selectionBackground: 'rgba(204,107,74,0.32)',
         black: '#35342E', red: '#E07B63', green: '#8FAE80', yellow: '#D9A05B',
         blue: '#7E9CC0', magenta: '#B58DA6', cyan: '#7FAE9E', white: '#DCD8CC',
         brightBlack: '#78746B', brightRed: '#ECA08C', brightGreen: '#AECBA0',
@@ -3081,6 +3199,21 @@ function openTerminal(t) {
   connectTermWs(t.id, { retry: false });
   setTimeout(fitTerm, 60);
 }
+
+$('#btn-term-font-dec').addEventListener('click', () => setTermFontSize(termFontSize() - 1));
+$('#btn-term-font-inc').addEventListener('click', () => setTermFontSize(termFontSize() + 1));
+
+/* First time in a terminal: explain the latched Ctrl key once. */
+function renderKeybarHint() {
+  const hint = $('#keybar-hint');
+  if (!hint) return;
+  hint.hidden = !!state.prefs.keybarHintSeen;
+}
+$('#keybar-hint-close').addEventListener('click', () => {
+  state.prefs.keybarHintSeen = true;
+  savePrefs();
+  renderKeybarHint();
+});
 
 async function connectTermWs(id, options = {}) {
   clearTimeout(state.term.reconnectTimer);
@@ -3233,7 +3366,9 @@ $('#btn-term-kill').addEventListener('click', () => {
 
 function setCtrlLatch(on) {
   state.term.ctrlLatch = on;
-  $('#key-ctrl').classList.toggle('latched', on);
+  const key = $('#key-ctrl');
+  key.classList.toggle('latched', on);
+  key.setAttribute('aria-pressed', on ? 'true' : 'false');
 }
 $('#keybar').addEventListener('click', (e) => {
   const btn = e.target.closest('button');
@@ -3279,6 +3414,21 @@ function statRow(k, v, cls = '') {
   return `<div class="stat-row"><span class="k">${esc(k)}</span><span class="v ${cls}">${v}</span></div>`;
 }
 
+function serverShellLabel() {
+  const server = state.serverInfo?.server;
+  if (server?.shellLabel) return server.shellLabel;
+  if (server?.platform === 'win32') return 'PowerShell';
+  if (server?.platform) return '系统 Shell';
+  return '';
+}
+
+function renderShellButton() {
+  const label = $('#new-shell-label');
+  if (!label) return;
+  const shell = serverShellLabel();
+  label.textContent = shell ? `打开 ${shell}` : '打开系统终端';
+}
+
 function renderStatusCards() {
   const link = $('#card-link');
   const si = state.serverInfo;
@@ -3293,6 +3443,7 @@ function renderStatusCards() {
     (si?.bridge?.init?.userAgent ? statRow('版本', esc(si.bridge.init.userAgent)) : '') +
     (si?.server ? statRow('主机', esc(`${si.server.host} (${si.server.platform})`)) : '');
   $('#app-version').textContent = si?.server?.version || '0.1';
+  renderShellButton();
   renderDeviceCard();
   renderShareCard();
 }
@@ -3461,10 +3612,17 @@ function renderDeviceCard() {
   }
   let html =
     statRow('当前设备', esc(device.name || device.id || '已配对')) +
-    statRow('权限范围', esc(deviceScopeLabel(device.scope))) +
-    statRow('设备角色', device.owner ? 'Owner' : '成员');
+    statRow('权限范围', esc(deviceScopeLabel(device.scope)) + (device.owner ? ' · Owner' : ''));
   if (device.owner) {
-    html += '<div class="acct-actions"><button class="btn-ghost" id="btn-manage-devices">管理已配对设备</button></div>';
+    html += `
+      <button class="nav-row" id="btn-manage-devices" type="button">
+        <span class="nr-ico">${UI_ICONS.devices}</span>
+        <span class="nr-main">
+          <span class="nr-title">管理已配对设备</span>
+          <span class="nr-sub">查看所有接入的手机，随时撤销权限</span>
+        </span>
+        ${UI_ICONS.chevronRight}
+      </button>`;
   }
   card.innerHTML = html;
   $('#btn-manage-devices', card)?.addEventListener('click', openDeviceManager);
@@ -3494,7 +3652,7 @@ async function openDeviceManager() {
             toast('设备访问已撤销');
           } catch (error) {
             button.disabled = false;
-            toast('撤销失败：' + error.message, 4000);
+            toast('撤销失败：' + error.message, { sticky: true });
           }
         });
         body.appendChild(row);
@@ -3517,11 +3675,18 @@ function renderShareCard() {
     return;
   }
   c.innerHTML = `
+    <div class="nav-row" role="heading" aria-level="3">
+      <span class="nr-ico">${UI_ICONS.share}</span>
+      <span class="nr-main">
+        <span class="nr-title">邀请新手机接入</span>
+        <span class="nr-sub">生成一次性二维码，让家人或另一台手机扫码加入</span>
+      </span>
+    </div>
     <div id="share-invite-result"></div>
     <div class="share-actions">
-      <button class="btn-ghost" data-invite-scope="chat-only">创建仅聊天邀请</button>
-      <button class="btn-ghost" data-invite-scope="read-only">创建只读邀请</button>
-      <button class="btn-primary" data-invite-scope="full-control">创建完整控制邀请</button>
+      <button class="btn-ghost" data-invite-scope="chat-only">仅聊天邀请</button>
+      <button class="btn-ghost" data-invite-scope="read-only">只读邀请</button>
+      <button class="btn-primary" data-invite-scope="full-control">完整控制邀请</button>
     </div>
     <div class="share-tip">邀请 5 分钟内有效且只能使用一次。完整控制可操作本机文件与终端，请仅发给可信设备。<br>局域网地址：${addrs.map((a) => `<span class="mono">${esc(a)}</span>`).join(' / ')}</div>`;
   $$('[data-invite-scope]', c).forEach((button) => button.addEventListener('click', async () => {
@@ -3533,9 +3698,9 @@ function renderShareCard() {
       holder.innerHTML = `
         <div class="share-qr"><img src="/api/qr?invite=${encodeURIComponent(invite.code)}" width="164" height="164" alt="一次性设备配对二维码"></div>
         <div class="device-invite-code mono">${esc(invite.code)}</div>
-        <div class="share-tip">权限：${esc(deviceScopeLabel(invite.scope))} · 5 分钟内使用一次</div>`;
+        <div class="share-tip">让新手机扫这个码（或手输上面的邀请码）· 权限：${esc(deviceScopeLabel(invite.scope))} · 5 分钟内使用一次</div>`;
     } catch (error) {
-      toast('创建邀请失败：' + error.message, 4000);
+      toast('创建邀请失败：' + error.message, { sticky: true });
     } finally {
       buttons.forEach((entry) => { entry.disabled = false; });
     }

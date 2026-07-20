@@ -24,10 +24,11 @@ class FakeBridge extends EventEmitter {
     this.state = 'ready';
     this.streamId = 'device-stream';
     this.calls = [];
+    this.pendingApprovals = [];
   }
 
   info() { return { state: this.state }; }
-  listPendingApprovals() { return []; }
+  listPendingApprovals() { return this.pendingApprovals; }
   isAllowed() { return true; }
   async call(method, params) {
     this.calls.push({ method, params });
@@ -313,6 +314,84 @@ test('gateway enforces scoped RPC and terminal capabilities server-side', async 
     const devicesDenied = await request(base, '/api/devices', { cookie: chatCookie });
     assert.equal(devicesDenied.status, 403);
   } finally {
+    await context.gateway.close();
+  }
+});
+
+test('hello and bridge-status only expose approvals to devices with approval.read', async () => {
+  const context = createDeviceGateway();
+  context.bridge.pendingApprovals = [{
+    rpcId: '41',
+    method: 'item/commandExecution/requestApproval',
+    params: { command: 'rm -rf /tmp/scratch' },
+    receivedAt: 1,
+    context: null,
+  }];
+  await context.gateway.listen({ host: '127.0.0.1', port: 0 });
+  const port = context.gateway.server.address().port;
+  const base = `http://127.0.0.1:${port}`;
+  const sockets = [];
+
+  try {
+    const ownerPair = await request(base, '/api/pair', {
+      method: 'POST',
+      body: { token: 'legacy-bootstrap', deviceName: 'Owner' },
+    });
+    const ownerCookie = cookieFrom(ownerPair);
+    const invite = await request(base, '/api/invites', {
+      method: 'POST',
+      cookie: ownerCookie,
+      body: { scope: 'chat-only' },
+    });
+    const chatPair = await request(base, '/api/pair', {
+      method: 'POST',
+      body: { token: (await invite.json()).code, deviceName: 'Chat phone' },
+    });
+    const chatCookie = cookieFrom(chatPair);
+
+    const openEvents = async (cookie) => {
+      const issued = await request(base, '/api/ws-ticket', {
+        method: 'POST',
+        cookie,
+        body: { channel: 'events' },
+      });
+      const ticket = (await issued.json()).ticket;
+      const socket = new WebSocket(
+        `ws://127.0.0.1:${port}/ws/events?ticket=${encodeURIComponent(ticket)}`,
+      );
+      sockets.push(socket);
+      const [raw] = await once(socket, 'message');
+      return { socket, hello: JSON.parse(raw.toString()) };
+    };
+
+    const owner = await openEvents(ownerCookie);
+    const chat = await openEvents(chatCookie);
+    assert.equal(owner.hello.approvals.length, 1);
+    assert.deepEqual(chat.hello.approvals, []);
+
+    const nextBridgeStatus = (socket) => new Promise((resolve) => {
+      const onMessage = (raw) => {
+        const message = JSON.parse(raw.toString());
+        if (message.type !== 'bridge-status') return;
+        socket.off('message', onMessage);
+        resolve(message);
+      };
+      socket.on('message', onMessage);
+    });
+    const ownerStatus = nextBridgeStatus(owner.socket);
+    const chatStatus = nextBridgeStatus(chat.socket);
+    context.bridge.emit('status', 'ready');
+
+    assert.equal((await ownerStatus).approvals.length, 1);
+    assert.deepEqual(
+      (await chatStatus).approvals,
+      [],
+      'devices without approval.read must not receive pending approval payloads',
+    );
+  } finally {
+    for (const socket of sockets) {
+      if (socket.readyState === WebSocket.OPEN) socket.terminate();
+    }
     await context.gateway.close();
   }
 });

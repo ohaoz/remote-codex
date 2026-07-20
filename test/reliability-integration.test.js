@@ -89,7 +89,11 @@ test('gateway uses structured approval protocol and terminal sync frames', () =>
   const app = read('web/app.js');
   assert.match(server, /submitApproval\(/);
   assert.match(server, /submissionId/);
-  assert.match(server, /type:\s*'bridge-status'[\s\S]*approvals:\s*bridge\.listPendingApprovals\(\)/);
+  assert.match(
+    server,
+    /type:\s*'bridge-status'[\s\S]*approvals:\s*canAccess\(principal,\s*'approval\.read'\)\s*\?\s*bridge\.listPendingApprovals\(\)\s*:\s*\[\]/,
+    'bridge-status must only broadcast approvals to devices holding approval.read',
+  );
   assert.match(app, /case 'bridge-status':[\s\S]*reconcileGatewayApprovals\(/);
   assert.match(server, /terminalSyncFrames\(/);
   assert.match(server, /sync-begin/);

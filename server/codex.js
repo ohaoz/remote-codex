@@ -71,11 +71,14 @@ const APPROVAL_METHODS = new Set([
 ]);
 
 const MAX_CACHED_EVENTS_PER_THREAD = 3000;
+const MAX_CACHED_CHARS_PER_THREAD = 4 * 1024 * 1024; // ~ serialized payload chars
 const MAX_TRACKED_THREADS = 30;
 const MAX_EVICTED_THREAD_MARKERS = 1000;
 const MAX_APPROVAL_TOMBSTONES = 500;
 const APPROVAL_TOMBSTONE_TTL_MS = 5 * 60 * 1000;
 const MAX_INDEXED_ITEMS = 5000;
+const MAX_STDERR_LINES = 50;
+const MAX_STDERR_CHARS_PER_LINE = 8192;
 
 function createStreamId() {
   return typeof crypto.randomUUID === 'function'
@@ -93,11 +96,14 @@ function createStreamId() {
 class ThreadEventLog {
   constructor(options = {}) {
     this.maxEventsPerThread = Math.max(1, options.maxEventsPerThread || MAX_CACHED_EVENTS_PER_THREAD);
+    this.maxCharsPerThread = Math.max(1, options.maxCharsPerThread || MAX_CACHED_CHARS_PER_THREAD);
     this.maxThreads = Math.max(1, options.maxThreads || MAX_TRACKED_THREADS);
     this.maxEvictedThreadMarkers = Math.max(
       this.maxThreads,
       options.maxEvictedThreadMarkers || MAX_EVICTED_THREAD_MARKERS,
     );
+    // Sizes are stored off-record so replay payloads stay wire-identical.
+    this._eventSizes = new WeakMap();
     this.reset(options.streamId || createStreamId());
   }
 
@@ -154,6 +160,7 @@ class ThreadEventLog {
       const evicted = this.evictedThreads.get(threadId);
       state = {
         events: [],
+        chars: 0,
         lastSeq: evicted ? evicted.lastSeq : 0,
         firstAvailableSeq: evicted ? evicted.lastSeq + 1 : 1,
         activeTurnId: evicted ? evicted.activeTurnId : null,
@@ -170,8 +177,14 @@ class ThreadEventLog {
       method,
       params,
     };
+    let recordSize = method.length;
+    try {
+      recordSize += JSON.stringify(params ?? null).length;
+    } catch {}
+    this._eventSizes.set(record, recordSize);
     state.lastSeq = record.seq;
     state.events.push(record);
+    state.chars += recordSize;
 
     if (method === 'turn/started') {
       state.activeTurnId = params?.turn?.id || params?.turnId || null;
@@ -183,7 +196,16 @@ class ThreadEventLog {
     }
 
     if (state.events.length > this.maxEventsPerThread) {
-      state.events.splice(0, state.events.length - this.maxEventsPerThread);
+      const removed = state.events.splice(0, state.events.length - this.maxEventsPerThread);
+      for (const entry of removed) state.chars -= this._eventSizes.get(entry) || 0;
+      state.truncated = true;
+    }
+    // The event count cap alone leaves the payload size unbounded (a single
+    // huge delta × 3000). Drop oldest events until the thread fits; replay
+    // then falls back to a canonical thread/read reset, which is safe.
+    while (state.events.length > 1 && state.chars > this.maxCharsPerThread) {
+      const entry = state.events.shift();
+      state.chars -= this._eventSizes.get(entry) || 0;
       state.truncated = true;
     }
     state.firstAvailableSeq = state.events.length ? state.events[0].seq : state.lastSeq + 1;
@@ -289,6 +311,7 @@ class CodexBridge extends EventEmitter {
     this.eventLog = new ThreadEventLog({
       streamId: this._createStreamId(),
       maxEventsPerThread: options.maxCachedEventsPerThread,
+      maxCharsPerThread: options.maxCachedCharsPerThread,
       maxThreads: options.maxTrackedThreads,
       maxEvictedThreadMarkers: options.maxEvictedThreadMarkers,
     });
@@ -321,8 +344,13 @@ class CodexBridge extends EventEmitter {
     rpc.on('notification', (n) => this._onNotification(n));
     rpc.on('request', (r) => this._onServerRequest(r));
     rpc.on('stderr', (s) => {
-      this.stderrTail.push(s);
-      if (this.stderrTail.length > 50) this.stderrTail.shift();
+      const line = String(s);
+      // Bound both line count and per-line size: a crash-looping child can
+      // emit arbitrarily large stderr chunks.
+      this.stderrTail.push(
+        line.length > MAX_STDERR_CHARS_PER_LINE ? line.slice(-MAX_STDERR_CHARS_PER_LINE) : line,
+      );
+      if (this.stderrTail.length > MAX_STDERR_LINES) this.stderrTail.shift();
     });
     let exitHandled = false;
     rpc.on('exit', ({ code }) => {

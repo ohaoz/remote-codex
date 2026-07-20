@@ -131,6 +131,44 @@ function createGateway(options = {}) {
   const socketExpiryTimers = new Map();
   const revokeTimers = new Set();
 
+  /**
+   * `/api/open-url` may only launch authorization pages that this gateway
+   * itself handed to a client via `account/login/start`. Tracking them here
+   * closes the "owner device can make the desktop open arbitrary URLs" SSRF /
+   * phishing surface: anything not in this short-lived set is rejected.
+   */
+  const pendingLoginUrls = new Map(); // authUrl -> expiresAt
+  const LOGIN_URL_TTL_MS = 10 * 60_000;
+  const MAX_PENDING_LOGIN_URLS = 5;
+
+  function rememberLoginRpc(method, result) {
+    if (method === 'account/login/start' && typeof result?.authUrl === 'string') {
+      pendingLoginUrls.set(result.authUrl, clock.now() + LOGIN_URL_TTL_MS);
+      while (pendingLoginUrls.size > MAX_PENDING_LOGIN_URLS) {
+        pendingLoginUrls.delete(pendingLoginUrls.keys().next().value);
+      }
+      return;
+    }
+    if (method === 'account/login/cancel' || method === 'account/logout') {
+      pendingLoginUrls.clear();
+    }
+  }
+
+  function isPendingLoginUrl(url) {
+    const expiresAt = pendingLoginUrls.get(url);
+    if (!expiresAt) return false;
+    if (expiresAt <= clock.now()) {
+      pendingLoginUrls.delete(url);
+      return false;
+    }
+    return true;
+  }
+
+  const onBridgeEventForLogin = (evt) => {
+    if (evt?.method === 'account/login/completed') pendingLoginUrls.clear();
+  };
+  bridge.on('event', onBridgeEventForLogin);
+
   if (!deviceAuth && (!auth || typeof auth.verify !== 'function')) {
     throw new TypeError('auth.verify(candidate, checkedAt) is required');
   }
@@ -256,6 +294,28 @@ function createGateway(options = {}) {
 
   const app = express();
   app.disable('x-powered-by');
+
+  // The chat UI renders untrusted model/MCP output with hand-escaped
+  // innerHTML. A strict CSP is the systemic backstop: even if one call site
+  // ever forgets esc(), injected markup cannot execute script.
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      "font-src 'self'",
+      "connect-src 'self' ws: wss:",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+    ].join('; '));
+    next();
+  });
 
   app.use('/', express.static(path.join(rootDir, 'web'), { index: 'index.html' }));
   app.use('/vendor/xterm.js', (req, res) => res.sendFile(path.join(rootDir, 'node_modules', '@xterm', 'xterm', 'lib', 'xterm.js')));
@@ -387,12 +447,27 @@ function createGateway(options = {}) {
   });
 
   app.post('/api/devices/:deviceId/rename', (req, res) => {
+    // Same defense-in-depth style as the other device endpoints: check the
+    // capability at the route even though PairingService re-checks it.
+    // Renaming your own device is allowed without devices.manage.
+    const renamesSelf = req.principal.deviceId === req.params.deviceId;
+    if (!renamesSelf && !canAccess(req.principal, 'devices.manage')) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    if (!name || name.length > 80) {
+      return res.status(400).json({ error: '设备名需为 1–80 个字符' });
+    }
     try {
-      return res.json({
-        device: deviceAuth.renameDevice(req.principal, req.params.deviceId, req.body?.name),
+      const device = deviceAuth.renameDevice(req.principal, req.params.deviceId, name);
+      audit(req.principal, {
+        action: 'device.rename',
+        resource: `device:${req.params.deviceId}`,
+        result: 'accepted',
       });
+      return res.json({ device });
     } catch (error) {
-      return res.status(403).json({ error: error.message });
+      return res.status(400).json({ error: error.message });
     }
   });
 
@@ -481,6 +556,7 @@ function createGateway(options = {}) {
         }, true);
       }
       const result = await bridge.call(method, enforced);
+      rememberLoginRpc(method, result);
       audit(req.principal, {
         action: 'rpc.call',
         resource: `rpc:${method}`,
@@ -497,13 +573,28 @@ function createGateway(options = {}) {
       return res.status(403).json({ error: 'forbidden' });
     }
     const { url } = req.body || {};
-    if (!url || !/^https?:\/\//i.test(url)) {
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
       return res.status(400).json({ error: 'invalid url' });
+    }
+    // Exact-match against auth URLs this gateway returned from
+    // account/login/start; arbitrary URLs (including intranet http://) are
+    // rejected even for owner devices.
+    if (!isPendingLoginUrl(url)) {
+      audit(req.principal, {
+        action: 'account.open-url',
+        resource: 'desktop-browser',
+        result: 'denied',
+        reason: 'url is not a pending login authorization page',
+        risk: 'medium',
+      });
+      return res.status(400).json({ error: '仅允许打开当前登录流程的授权页，请重新发起登录' });
     }
     try {
       let child;
       if (platform === 'win32') {
-        child = spawnProcess('cmd.exe', ['/d', '/s', '/c', 'start', '', url.replace(/&/g, '^&')], {
+        // rundll32 takes the URL as a plain argument — nothing is parsed by
+        // cmd.exe, so ^ % " & and friends stay inert.
+        child = spawnProcess('rundll32', ['url.dll,FileProtocolHandler', url], {
           detached: true,
           stdio: 'ignore',
         });
@@ -513,6 +604,12 @@ function createGateway(options = {}) {
         child = spawnProcess('xdg-open', [url], { detached: true, stdio: 'ignore' });
       }
       child.unref();
+      audit(req.principal, {
+        action: 'account.open-url',
+        resource: 'desktop-browser',
+        result: 'accepted',
+        risk: 'medium',
+      });
       return res.json({ ok: true });
     } catch (error) {
       return res.status(500).json({ error: error.message });
@@ -529,7 +626,14 @@ function createGateway(options = {}) {
     } catch {
       return res.status(400).json({ error: '无效的网址' });
     }
-    if (!/^(localhost|127\.0\.0\.1)$/i.test(callbackUrl.hostname)) {
+    // The codex login helper listens exactly on http://localhost:1455.
+    // Pinning protocol, host and port keeps this endpoint from being used to
+    // probe other local services (limited SSRF).
+    if (
+      callbackUrl.protocol !== 'http:'
+      || !/^(localhost|127\.0\.0\.1)$/i.test(callbackUrl.hostname)
+      || (callbackUrl.port || '1455') !== '1455'
+    ) {
       return res.status(400).json({ error: '请粘贴以 http://localhost:1455 开头的回调网址' });
     }
     let done = false;
@@ -541,7 +645,7 @@ function createGateway(options = {}) {
     const forwarded = httpGet(
       {
         host: '127.0.0.1',
-        port: callbackUrl.port || '1455',
+        port: '1455',
         path: callbackUrl.pathname + callbackUrl.search,
         timeout: 20000,
       },
@@ -661,6 +765,7 @@ function createGateway(options = {}) {
             }, true);
           }
           const result = await bridge.call(message.method, enforced);
+          rememberLoginRpc(message.method, result);
           wsSend(ws, { type: 'rpc-result', reqId: message.reqId, result });
         } catch (error) {
           wsSend(ws, {
@@ -914,6 +1019,7 @@ function createGateway(options = {}) {
     closePromise = (async () => {
       let failure = null;
       try {
+        bridge.off('event', onBridgeEventForLogin);
         if (deviceAuth?.off) deviceAuth.off('device-revoked', onDeviceRevoked);
         for (const timer of revokeTimers) clearTimeout(timer);
         revokeTimers.clear();

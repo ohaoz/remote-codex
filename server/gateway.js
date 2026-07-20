@@ -56,6 +56,13 @@ function listDrives(platform = process.platform) {
   return out;
 }
 
+/** Mirrors terminals.defaultShellLabel without forcing node-pty to load. */
+function shellLabelFor(platform = process.platform, env = process.env) {
+  if (platform === 'win32') return 'PowerShell';
+  const shell = String(env.SHELL || '/bin/bash');
+  return shell.split('/').pop() || 'shell';
+}
+
 function parseCookies(header) {
   const cookies = {};
   for (const part of String(header || '').split(';')) {
@@ -438,6 +445,7 @@ function createGateway(options = {}) {
         version: require('../package.json').version,
         host: hostname(),
         platform,
+        shellLabel: shellLabelFor(platform),
         port: listeningPort(),
         addrs: getLanAddresses(),
         home: homedir(),

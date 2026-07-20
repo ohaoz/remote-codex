@@ -70,9 +70,9 @@
     --faint: #78746B;
     --accent: #CC6B4A;
     --accent-ink: #FFFFFF;
-    --accent-dim: rgba(217, 119, 87, 0.14);
-    --accent-border: rgba(217, 119, 87, 0.48);
-    --accent-glow: rgba(217, 119, 87, 0.26);
+    --accent-dim: rgba(204, 107, 74, 0.14);
+    --accent-border: rgba(204, 107, 74, 0.48);
+    --accent-glow: rgba(204, 107, 74, 0.26);
     --ok: #8FAE80;
     --ok-border: rgba(143, 174, 128, 0.5);
     --danger: #E07B63;
@@ -151,12 +151,53 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   flex: 1; display: flex; flex-direction: column; justify-content: center;
   padding: 32px 28px calc(28px + var(--sab));
   max-width: 460px; margin: 0 auto; width: 100%;
-  min-height: 0;
+  min-height: 0; overflow-y: auto;
 }
-.login-mark { margin-bottom: 40px; }
+.login-mark { margin-bottom: 26px; }
 .login-mark .mark-eyebrow { margin-bottom: 16px; }
-.login-sub { color: var(--dim); font-size: 14px; line-height: 1.7; margin: 16px 0 0; }
-.pair-form { display: flex; flex-direction: column; gap: 12px; }
+.login-sub { color: var(--dim); font-size: 14px; line-height: 1.7; margin: 14px 0 0; }
+
+/* 三步引导：扫码是主路径 */
+.pair-steps {
+  list-style: none; margin: 0 0 18px; padding: 0;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.pair-step {
+  display: flex; gap: 13px; align-items: flex-start;
+  border: 1px solid var(--line-soft); border-radius: 14px;
+  background: var(--surface); padding: 13px 15px;
+}
+.pair-step .ps-num {
+  flex: none; width: 26px; height: 26px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  color: var(--accent); background: var(--accent-dim);
+  border: 1px solid var(--accent-border);
+}
+.pair-step .ps-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.pair-step .ps-body b { font-size: 14.5px; }
+.pair-step .ps-body span { color: var(--dim); font-size: 12.5px; line-height: 1.6; }
+.pair-step .ps-body code {
+  font-family: var(--mono); font-size: 0.92em; color: var(--accent);
+  background: var(--accent-dim); border-radius: 5px; padding: 1px 5px;
+}
+
+/* 手输配对码 —— 折叠的兜底路径 */
+.pair-manual { border-top: 1px solid var(--line-soft); padding-top: 4px; }
+.pair-manual summary {
+  list-style: none; cursor: pointer;
+  color: var(--dim); font-size: 13.5px; padding: 11px 2px;
+  display: flex; align-items: center; gap: 7px; min-height: 44px;
+}
+.pair-manual summary::-webkit-details-marker { display: none; }
+.pair-manual summary::before {
+  content: ""; width: 7px; height: 7px; flex: none;
+  border-right: 1.8px solid var(--faint); border-bottom: 1.8px solid var(--faint);
+  transform: rotate(-45deg); transition: transform 0.15s ease;
+}
+.pair-manual[open] summary::before { transform: rotate(45deg); }
+.pair-manual[open] summary { color: var(--accent); }
+.pair-form { display: flex; flex-direction: column; gap: 12px; padding: 4px 0 6px; }
 .field-label {
   font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.16em; color: var(--faint);
 }
@@ -166,9 +207,9 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   padding: 14px 16px; outline: none; width: 100%;
 }
 .pair-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
-.pair-error { color: var(--danger); font-size: 13px; margin: 2px 0 0; }
+.pair-error { color: var(--danger); font-size: 13px; margin: 10px 0 0; line-height: 1.55; }
 .login-foot {
-  margin-top: 48px; color: var(--faint); font-size: 12px; text-align: center;
+  margin-top: 30px; color: var(--faint); font-size: 12px; text-align: center;
 }
 
 .btn-primary {
@@ -176,14 +217,21 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   font-weight: 600; font-size: 15px;
   border-radius: 12px; padding: 14px 18px;
   transition: transform 0.06s ease, filter 0.15s ease;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
 }
 .btn-primary:active { transform: scale(0.985); filter: brightness(0.93); }
 .btn-ghost {
   background: transparent; border: 1px solid var(--line); color: var(--text);
   border-radius: 12px; padding: 13px 18px; font-size: 14.5px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
 }
 .btn-ghost:active { background: var(--surface2); }
 .danger-text { color: var(--danger); border-color: var(--danger-border); }
+.btn-ico {
+  width: 17px; height: 17px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 
 /* ==========================================================================
    顶部遥测条
@@ -299,7 +347,7 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
 }
 .local-send-status {
   margin-top: 6px; color: var(--faint);
-  font-family: var(--mono); font-size: 10.5px; line-height: 1.4;
+  font-size: 11.5px; line-height: 1.5;
 }
 .local-send.failed .local-send-status { color: var(--danger); }
 .local-send.unknown .local-send-status { color: var(--accent); }
@@ -363,7 +411,15 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
 }
 .act-head .act-ico { flex: none; width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .act-head .act-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.act-head .act-state { flex: none; font-size: 10.5px; letter-spacing: 0.08em; }
+.act-head .act-state {
+  flex: none; font-size: 10.5px; letter-spacing: 0.08em;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.act-state .act-state-ico {
+  width: 11px; height: 11px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 2.4;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .act.running { border-color: var(--accent-border); }
 .act.running .act-state { color: var(--accent); }
 .act.ok .act-state { color: var(--ok); }
@@ -439,12 +495,22 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
 .turn-status.err { color: var(--danger); }
 
 /* ==========================================================================
-   审批停靠区
+   审批停靠区 —— 限高，多条时给计数头，避免挤没聊天流
    ========================================================================== */
 .approval-dock {
   display: flex; flex-direction: column; gap: 10px;
   padding: 0 14px;
-  max-height: 46vh; overflow-y: auto;
+  max-height: 32vh; overflow-y: auto;
+}
+.approval-dock-head {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+  color: var(--accent); text-transform: uppercase;
+  background: var(--bg); padding: 4px 2px;
+}
+.approval-dock-head::after {
+  content: ""; flex: 1; height: 1px; background: var(--accent-border);
 }
 .approval-card {
   border: 1px solid var(--accent-border);
@@ -471,7 +537,10 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   color: var(--accent); margin-bottom: 7px; text-transform: uppercase;
   display: flex; align-items: center; gap: 7px;
 }
-.approval-kicker::before { content: "✳"; font-size: 12px; }
+.approval-kicker .kicker-spark {
+  width: 11px; height: 11px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round;
+}
 .approval-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
 .approval-cmd {
   font-family: var(--mono); font-size: 12px; line-height: 1.5;
@@ -519,6 +588,20 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   background: var(--chrome-solid);
   padding: 8px 12px calc(8px + var(--sab) * 0.4);
 }
+/* 链路未就绪时的显式说明条 —— 不再只有"输入框变灰" */
+.composer-lock {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px; padding: 8px 12px;
+  border: 1px solid var(--accent-border); border-radius: 11px;
+  background: var(--accent-dim);
+  color: var(--accent); font-size: 12.5px; line-height: 1.5;
+  animation: rise 0.18s ease;
+}
+.composer-lock .spin {
+  width: 12px; height: 12px; border-radius: 50%; flex: none;
+  border: 1.6px solid var(--accent-border); border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
 .execution-context {
   display: flex; align-items: center; gap: 6px; min-width: 0;
   padding: 0 3px 7px; color: var(--dim); font-size: 11.5px;
@@ -533,15 +616,19 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   min-width: 0; flex: 1; color: var(--faint);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.chip-row { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: none; }
-.chip-row::-webkit-scrollbar { display: none; }
 .chip {
   flex: none; font-family: var(--mono); font-size: 11.5px;
   color: var(--dim); border: 1px solid var(--line); border-radius: 999px;
   padding: 5.5px 12px; white-space: nowrap; background: var(--surface);
+  display: inline-flex; align-items: center; gap: 5px; min-height: 34px;
 }
 .chip:active { border-color: var(--accent); color: var(--accent); }
 .chip.set { color: var(--accent); border-color: var(--accent-border); background: var(--accent-dim); }
+.chip .chip-ico {
+  width: 12px; height: 12px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.9;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .composer-bar { display: flex; gap: 9px; align-items: flex-end; }
 .composer-input {
   flex: 1; resize: none; max-height: 132px;
@@ -582,6 +669,11 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   display: inline-flex; align-items: center; justify-content: center;
   background: var(--accent-dim);
 }
+.term-item .ti-glyph svg {
+  width: 16px; height: 16px;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .term-item .ti-main { flex: 1; min-width: 0; }
 .term-item .ti-title { font-size: 14.5px; }
 .term-item .ti-sub { font-family: var(--mono); font-size: 11px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
@@ -610,6 +702,19 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
 .term-connection-status[data-state="blocked"] { color: #E07B63; }
 .xterm-holder { flex: 1; min-height: 0; padding: 4px 2px 0 6px; }
 .xterm-holder .xterm { height: 100%; }
+.keybar-hint {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 8px 6px; padding: 9px 12px;
+  border: 1px solid var(--well-line); border-radius: 10px;
+  background: #262523; color: #A6A299;
+  font-size: 12px; line-height: 1.55;
+}
+.keybar-hint b { color: #CC6B4A; font-weight: 600; }
+.keybar-hint button {
+  flex: none; color: #CC6B4A; font-size: 12px;
+  border: 1px solid rgba(204, 107, 74, 0.48); border-radius: 8px;
+  padding: 6px 10px; min-height: 32px;
+}
 .keybar {
   display: flex; gap: 6px; padding: 7px 8px calc(7px + var(--sab) * 0.5);
   border-top: 1px solid var(--well-line); overflow-x: auto; scrollbar-width: none;
@@ -621,7 +726,9 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   color: #A6A299; border: 1px solid var(--well-line); border-radius: 9px; padding: 9px 0;
   background: #262523;
 }
-.keybar button:active, .keybar button.latched { color: #D97757; border-color: #D97757; }
+/* 终端窗井恒为深色，这里用深色主题的品牌色常量（与 --accent dark 一致） */
+.keybar button:active, .keybar button.latched { color: #CC6B4A; border-color: #CC6B4A; }
+.keybar button.latched { background: rgba(204, 107, 74, 0.14); }
 
 /* ==========================================================================
    状态页
@@ -644,6 +751,33 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
 .stat-row .v.ok { color: var(--ok); }
 .stat-row .v.warn { color: var(--accent); }
 .stat-row .v.err { color: var(--danger); }
+/* 状态页里的主导航行 —— 设备管理 / 分享接入等重要任务的一级入口 */
+.nav-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  padding: 13px 2px; border-top: 1px solid var(--line-soft);
+  min-height: 52px;
+}
+.nav-row:first-child { border-top: none; }
+.nav-row:active { background: var(--surface2); }
+.nav-row .nr-ico {
+  flex: none; width: 34px; height: 34px; border-radius: 10px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--accent); background: var(--accent-dim);
+  border: 1px solid var(--accent-border);
+}
+.nav-row .nr-ico svg {
+  width: 17px; height: 17px;
+  fill: none; stroke: currentColor; stroke-width: 1.9;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.nav-row .nr-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.nav-row .nr-title { font-size: 14.5px; color: var(--text); }
+.nav-row .nr-sub { color: var(--faint); font-size: 12px; line-height: 1.45; }
+.nav-row .nr-chevron {
+  flex: none; width: 15px; height: 15px;
+  fill: none; stroke: var(--faint); stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .meter { display: flex; flex-direction: column; gap: 6px; padding: 11px 0; border-top: 1px solid var(--line-soft); }
 .meter .m-head { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--dim); }
 .meter .m-head .mono { color: var(--text); }
@@ -685,7 +819,12 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   padding: 11px 10px; border-radius: 10px; font-size: 14px;
 }
 .dir-item:active { background: var(--surface2); }
-.dir-item .d-ico { color: var(--accent); font-family: var(--mono); flex: none; }
+.dir-item .d-ico { color: var(--accent); font-family: var(--mono); flex: none; display: inline-flex; }
+.dir-item .d-ico svg {
+  width: 14px; height: 14px;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .dir-item.up { color: var(--dim); }
 .dir-item .d-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -755,12 +894,17 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
 .opt-row .o-title { color: var(--text); display: block; }
 .opt-row .o-sub { color: var(--faint); font-size: 12px; margin-top: 2px; line-height: 1.45; display: block; }
 .opt-row .o-check { flex: none; color: var(--accent); font-family: var(--mono); opacity: 0; }
+.opt-row .o-check svg {
+  width: 15px; height: 15px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 2.2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
 .opt-row.selected .o-check { opacity: 1; }
 .opt-row.selected .o-title { color: var(--accent); }
 .opt-danger .o-title { color: var(--danger); }
 
 /* ==========================================================================
-   Toast
+   Toast —— 普通提示自动消失；重要错误驻留并带关闭按钮
    ========================================================================== */
 .toast {
   position: absolute; left: 50%; bottom: calc(96px + var(--sab));
@@ -771,6 +915,16 @@ button { font-family: inherit; color: inherit; background: none; border: none; c
   z-index: 60; max-width: 84vw; text-align: center;
   animation: rise 0.2s ease;
   box-shadow: 0 8px 30px rgba(31, 30, 27, 0.28);
+}
+.toast.sticky {
+  display: flex; align-items: center; gap: 12px;
+  text-align: left; padding-right: 10px;
+  border-color: rgba(224, 123, 99, 0.55);
+}
+.toast .toast-close {
+  flex: none; color: var(--toast-text); opacity: 0.85;
+  border: 1px solid var(--toast-line); border-radius: 8px;
+  padding: 5px 10px; font-size: 12px; min-height: 32px;
 }
 
 /* 桌面宽屏微调 */

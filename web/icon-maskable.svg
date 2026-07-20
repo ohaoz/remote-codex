@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- maskable: full-bleed background, content inside the central 80% safe zone -->
+  <rect width="512" height="512" fill="#FAF9F5"/>
+  <rect x="102" y="102" width="308" height="308" rx="70" fill="none" stroke="#DFDCD0" stroke-width="9"/>
+  <path d="M182 198l58 58-58 58" fill="none" stroke="#1F1E1D" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="266" y="198" width="74" height="116" rx="9" fill="#C96442"/>
+</svg>

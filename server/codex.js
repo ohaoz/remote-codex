@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { JsonRpcProcess } = require('./jsonrpc');
+const { validateApprovalResult } = require('./risk-policy');
 
 const APP_VERSION = require('../package.json').version;
 
@@ -485,6 +486,23 @@ class CodexBridge extends EventEmitter {
         rpcId: key,
         submissionId,
         resolvedBySubmissionId: null,
+      };
+    }
+    const validation = validateApprovalResult({
+      method: entry.method,
+      params: entry.params,
+      result,
+    });
+    if (!validation.ok) {
+      // Reject the malformed decision but keep the approval pending so a valid
+      // client can still answer it. Retrying the same payload cannot help.
+      return {
+        status: 'failed',
+        retryable: false,
+        rpcId: key,
+        submissionId,
+        resolvedBySubmissionId: null,
+        error: validation.error,
       };
     }
     try {

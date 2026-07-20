@@ -149,6 +149,62 @@ test('failed app-server response keeps approval pending for same-submission retr
   assert.equal(duplicate.resolvedBySubmissionId, 'submission-a');
 });
 
+test('malformed approval results are rejected server-side and stay pending', () => {
+  const bridge = makeBridge();
+  const writes = [];
+  bridge.rpc = { respond(id, result) { writes.push({ id, result }); } };
+
+  bridge._onServerRequest({
+    id: 20,
+    method: 'item/fileChange/requestApproval',
+    params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'item-1' },
+  });
+  const badDecision = bridge.resolveApproval('20', { decision: 'yolo' }, 'submission-a');
+  assert.equal(badDecision.status, 'failed');
+  assert.equal(badDecision.retryable, false);
+  assert.match(badDecision.error, /decision/i);
+
+  bridge._onServerRequest({
+    id: 21,
+    method: 'item/commandExecution/requestApproval',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-2',
+      availableDecisions: ['accept', 'decline'],
+    },
+  });
+  const outsideMenu = bridge.resolveApproval('21', { decision: 'acceptForSession' }, 'submission-b');
+  assert.equal(outsideMenu.status, 'failed');
+  assert.equal(outsideMenu.retryable, false);
+
+  bridge._onServerRequest({
+    id: 22,
+    method: 'item/permissions/requestApproval',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-3',
+      permissions: { network: { enabled: false } },
+    },
+  });
+  const escalated = bridge.resolveApproval(
+    '22',
+    { permissions: { network: { enabled: true } }, scope: 'session' },
+    'submission-c',
+  );
+  assert.equal(escalated.status, 'failed');
+  assert.equal(escalated.retryable, false);
+  assert.match(escalated.error, /permission/i);
+
+  assert.equal(writes.length, 0, 'invalid results must never reach the app-server');
+  assert.equal(bridge.listPendingApprovals().length, 3, 'rejected submissions keep approvals pending');
+
+  const valid = bridge.resolveApproval('20', { decision: 'accept' }, 'submission-d');
+  assert.equal(valid.status, 'accepted');
+  assert.deepEqual(writes, [{ id: 20, result: { decision: 'accept' } }]);
+});
+
 test('two clients racing an approval produce one acceptance and one tombstone result', () => {
   const bridge = makeBridge();
   const writes = [];
